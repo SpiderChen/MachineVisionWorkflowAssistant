@@ -9,6 +9,11 @@ on:
 permissions:
   contents: write # 打 v* tag 时创建 Release 需要写权限
 
+# 同一分支/tag 的新构建自动取消上一次未完成的运行，避免卡队的 job 越堆越多
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build-windows:
     runs-on: windows-latest
@@ -48,16 +53,9 @@ jobs:
           path: release/MachineVisionWorkflowAssistant-windows.zip
           if-no-files-found: error
 
-  build-macos:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: macos-13 # Intel x86_64
-            arch: intel
-          - os: macos-14 # Apple Silicon arm64
-            arch: arm64
-    runs-on: ${{ matrix.os }}
+  # Apple Silicon（macos-14）：稳定，作为 macOS 的主构建，参与发布门禁
+  build-macos-arm64:
+    runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -79,20 +77,56 @@ jobs:
           cd dist
           ditto -c -k --sequesterRsrc --keepParent \
             "MachineVisionWorkflowAssistant.app" \
-            "../MachineVisionWorkflowAssistant-macos-${{ matrix.arch }}.zip"
+            "../MachineVisionWorkflowAssistant-macos-arm64.zip"
       - name: Upload .app artifact
         uses: actions/upload-artifact@v4
         with:
-          name: MachineVisionWorkflowAssistant-macos-${{ matrix.arch }}
-          path: MachineVisionWorkflowAssistant-macos-${{ matrix.arch }}.zip
+          name: MachineVisionWorkflowAssistant-macos-arm64
+          path: MachineVisionWorkflowAssistant-macos-arm64.zip
+          if-no-files-found: error
+
+  # Intel（macos-13）：GitHub 构建机紧缺、常排长队。设为「尽力而为」：
+  # continue-on-error 不影响整体结论、40min 运行上限、且不进发布门禁（见 release.needs）。
+  build-macos-intel:
+    runs-on: macos-13
+    continue-on-error: true
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip wheel
+          pip install -r requirements.txt
+          pip install "pyobjc-framework-Cocoa" "pyobjc-framework-Quartz"
+          pip install pyinstaller
+      - name: Build .app
+        run: pyinstaller MachineVisionWorkflowAssistant.spec --noconfirm --clean
+      - name: Ad-hoc codesign (无开发者证书，仅让 Gatekeeper 少报错)
+        run: codesign --force --deep --sign - "dist/MachineVisionWorkflowAssistant.app" || true
+      - name: Zip .app bundle
+        run: |
+          cd dist
+          ditto -c -k --sequesterRsrc --keepParent \
+            "MachineVisionWorkflowAssistant.app" \
+            "../MachineVisionWorkflowAssistant-macos-intel.zip"
+      - name: Upload .app artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MachineVisionWorkflowAssistant-macos-intel
+          path: MachineVisionWorkflowAssistant-macos-intel.zip
           if-no-files-found: error
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [build-windows, build-macos]
+    # 只依赖稳定的两个构建；Intel 若卡队/失败不会阻塞发布（其产物若已就绪仍会被收进来）
+    needs: [build-windows, build-macos-arm64]
     runs-on: ubuntu-latest
     steps:
-      - name: Download all artifacts
+      - name: Download all available artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts
