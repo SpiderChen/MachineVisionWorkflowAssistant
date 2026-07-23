@@ -20,6 +20,7 @@ from .input_ctl import InputController, InputError, activate_window
 from .logger import save_snapshot
 from .login_flow import LoginFlow
 from .monitor import RunEvent, RunMonitor
+from .reactive import Outcome, default_rules
 from .vision import LocateResult, Screenshot, Vision
 
 logger = logging.getLogger(__name__)
@@ -83,6 +84,7 @@ class Engine:
         self._cur_idx = 0
         self._cur_total = 0
         self.flows = FlowStore.load()
+        self.rules = default_rules()       # 反应式派发规则（截屏→命中谁→执行谁）
         self.login_flow = LoginFlow(settings, vision, inputs, self._notify,
                                     run_flow=self.run_flow)
 
@@ -252,14 +254,77 @@ class Engine:
         if cfg.window_title:
             activate_window(cfg.window_title)
             time.sleep(0.8)
+        # 反应式派发：每轮截一次屏，看当前屏幕命中哪条规则，就执行对应的操作。
+        self._dispatch(task)
 
-        # 1. 状态判定：登录页 → §5；主页面 → 继续；未知 → F5 后再试一轮
-        self._ensure_main_page()
+    # ------------------------------------------------------------------
+    # 反应式派发循环（截屏 → 匹配规则 → 执行；替代原固定顺序的状态分支）
+    # ------------------------------------------------------------------
 
-        # 2. 执行任务指定的流程（默认 print_order，可在流程编排页编辑）
-        self.run_flow(task.flow, {"vehicle_no": task.vehicle_no})
+    def _dispatch(self, task: Task) -> None:
+        """每轮只截一次屏，按优先级匹配规则，命中第一条即执行，处理完再派发。
 
-        # 3. 流程⑥（可选）：打印成功特征校验（内置打印流程保留原开关语义）
+        - 多规则同屏命中：靠优先级确定性消歧（不猜）。
+        - 无任何规则命中：F5 刷新一轮，仍无命中则失败并快照（宁可失败不乱点）。
+        - 有进展（HANDLED）即重置 F5 配额与超时——人工登录等长等待不算超时。
+        - 同一规则反复命中却无进展则中止，防死循环。
+        """
+        cfg = self.s.engine
+        ctx = {"vehicle_no": task.vehicle_no}
+        rules = sorted(self.rules, key=lambda r: r.priority)
+        deadline = time.monotonic() + cfg.dispatch_timeout
+        refreshed = False
+        last_shot = None
+        last_fired = None
+        repeat = 0
+        self._emit("state", message="派发中：看当前屏幕是什么，就做对应的事…")
+        while True:
+            if self._stop.is_set():
+                raise StepError("引擎已停止")
+            if time.monotonic() >= deadline:
+                raise StepError(
+                    f"派发超时（{cfg.dispatch_timeout:.0f}s 内无法完成任务）", last_shot)
+
+            shot = self.vision.capture()
+            last_shot = shot
+            fired = None
+            for rule in rules:
+                try:
+                    if rule.detect(self, shot):
+                        fired = rule
+                        break
+                except Exception:
+                    logger.debug("规则 %s 匹配异常", rule.name, exc_info=True)
+
+            if fired is None:
+                if not refreshed:
+                    logger.info("未匹配到任何规则，F5 刷新后重试")
+                    self._emit("state", message="未识别当前页面，F5 刷新后重试…")
+                    self.inputs.key_tap("f5")
+                    refreshed = True
+                    self._stop.wait(cfg.refresh_wait)
+                    continue
+                raise StepError("无法识别当前页面（无任何规则命中，宁可失败不乱点）", shot)
+
+            repeat = repeat + 1 if fired is last_fired else 0
+            last_fired = fired
+            if repeat >= 5:
+                raise StepError(
+                    f"规则「{fired.title}」反复命中却无进展，中止以防死循环", shot)
+
+            logger.info("派发命中规则「%s」(%s)", fired.title, fired.name)
+            self._emit("state", message=f"命中规则「{fired.title}」→ {fired.about}")
+            if fired.act(self, task, ctx) is Outcome.DONE:
+                return
+            # 有进展：重置刷新配额与派发超时（人工登录等长等待不应被判超时）
+            refreshed = False
+            deadline = time.monotonic() + cfg.dispatch_timeout
+
+    def _run_main_task(self, task: Task, ctx: dict) -> None:
+        """主页面规则的处理器：执行任务指定的流程（有序），并做可选成功校验。"""
+        cfg = self.s.engine
+        self.run_flow(task.flow, ctx)
+        # 流程⑥（可选）：打印成功特征校验（内置打印流程保留原开关语义）
         if task.flow == "print_order" and cfg.verify_success and L.PRINT_SUCCESS.path.exists():
             res = self.vision.wait_for(L.PRINT_SUCCESS, timeout=cfg.step_timeout)
             if not res.ok:
@@ -447,26 +512,6 @@ class Engine:
     # ------------------------------------------------------------------
     # 页面状态（README §3 左侧分支）
     # ------------------------------------------------------------------
-
-    def _ensure_main_page(self) -> None:
-        cfg = self.s.engine
-        self._emit("state", message="判定页面状态（登录页 / 主页面）…")
-        shot = None
-        for round_ in (0, 1):
-            for _ in range(cfg.state_retries):
-                shot = self.vision.capture()
-                state = self.vision.page_state(shot)
-                if state == "main":
-                    return
-                if state == "login":
-                    self._handle_login()
-                    return
-                self._stop.wait(1.0)
-            if round_ == 0:
-                logger.info("页面状态未知，F5 刷新后重试")
-                self.inputs.key_tap("f5")
-                self._stop.wait(cfg.refresh_wait)
-        raise StepError("无法识别页面状态（既非登录页也非主页面）", shot)
 
     def _handle_login(self) -> None:
         if self.s.engine.auto_login:

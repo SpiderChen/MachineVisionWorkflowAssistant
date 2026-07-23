@@ -19,8 +19,9 @@ from PySide6.QtCore import QPoint, QRect, Qt, Signal
 from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout, QGroupBox,
-    QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget, QMenu,
-    QMessageBox, QPlainTextEdit, QPushButton, QSplitter, QVBoxLayout, QWidget,
+    QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem,
+    QMenu, QMessageBox, QPlainTextEdit, QPushButton, QSizePolicy, QSplitter,
+    QToolButton, QVBoxLayout, QWidget,
 )
 
 from ..flows import (
@@ -220,28 +221,27 @@ class FlowTab(QWidget):
         lv.addLayout(brow)
 
         self.list_steps = QListWidget()
+        self.list_steps.setDragDropMode(QListWidget.InternalMove)
         self.list_steps.currentRowChanged.connect(self._on_step_selected)
-        lv.addWidget(QLabel("步骤（按执行顺序）"))
+        self.list_steps.model().rowsMoved.connect(self._on_rows_moved)
+        self.list_steps.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.list_steps.customContextMenuRequested.connect(self._on_step_menu)
+        lv.addWidget(QLabel("步骤（拖拽排序；右键上移 / 下移 / 删除）"))
         lv.addWidget(self.list_steps, stretch=1)
 
-        srow = QHBoxLayout()
-        for text, fn in (("⬆ 上移", lambda: self._move_step(-1)),
-                         ("⬇ 下移", lambda: self._move_step(1)),
-                         ("删除步骤", self._delete_step)):
-            b = QPushButton(text)
-            b.clicked.connect(fn)
-            srow.addWidget(b)
-        lv.addLayout(srow)
-
-        self.btn_add = QPushButton("➕ 框选添加步骤")
+        # 一个按钮搞定所有添加：点击=框选添加，下拉里选按键/等待
+        self.btn_add = QToolButton()
+        self.btn_add.setText("➕ 添加步骤")
+        self.btn_add.setToolButtonStyle(Qt.ToolButtonTextOnly)
+        self.btn_add.setPopupMode(QToolButton.MenuButtonPopup)
+        self.btn_add.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.btn_add.clicked.connect(self._start_add)
+        add_menu = QMenu(self.btn_add)
+        add_menu.addAction("框选添加（点击 / 输入等）", self._start_add)
+        add_menu.addAction("按键步骤（Enter/F5 等）", lambda: self._add_plain("key"))
+        add_menu.addAction("等待秒数步骤", lambda: self._add_plain("sleep"))
+        self.btn_add.setMenu(add_menu)
         lv.addWidget(self.btn_add)
-        btn_misc = QPushButton("➕ 添加按键 / 等待步骤 ▾")
-        menu = QMenu(btn_misc)
-        menu.addAction("按键步骤（Enter/F5 等）", lambda: self._add_plain("key"))
-        menu.addAction("等待秒数步骤", lambda: self._add_plain("sleep"))
-        btn_misc.setMenu(menu)
-        lv.addWidget(btn_misc)
         btn_save = QPushButton("💾 保存流程")
         btn_save.clicked.connect(self._save)
         lv.addWidget(btn_save)
@@ -357,7 +357,9 @@ class FlowTab(QWidget):
         self.list_steps.clear()
         if self.flow:
             for i, s in enumerate(self.flow.steps, 1):
-                self.list_steps.addItem(f"{i}. {s.label()}")
+                item = QListWidgetItem(f"{i}. {s.label()}")
+                item.setData(Qt.UserRole, s.id)      # 拖拽排序后据此回写步骤顺序
+                self.list_steps.addItem(item)
         self._loading = False
         if self.flow and self.flow.steps:
             row = keep_row if 0 <= keep_row < len(self.flow.steps) else 0
@@ -609,6 +611,30 @@ class FlowTab(QWidget):
         row = self.list_steps.currentRow()
         if self.flow and 0 <= row < len(self.flow.steps):
             self.list_steps.item(row).setText(f"{row + 1}. {s.label()}")
+
+    def _on_step_menu(self, pos) -> None:
+        item = self.list_steps.itemAt(pos)
+        if item is None:
+            return
+        self.list_steps.setCurrentItem(item)
+        menu = QMenu(self.list_steps)
+        menu.addAction("⬆ 上移", lambda: self._move_step(-1))
+        menu.addAction("⬇ 下移", lambda: self._move_step(1))
+        menu.addSeparator()
+        menu.addAction("删除步骤", self._delete_step)
+        menu.exec(self.list_steps.mapToGlobal(pos))
+
+    def _on_rows_moved(self, *_) -> None:
+        """拖拽结束后：按列表当前顺序回写 flow.steps，并重排序号。"""
+        if self._loading or not self.flow:
+            return
+        by_id = {s.id: s for s in self.flow.steps}
+        order = [self.list_steps.item(i).data(Qt.UserRole)
+                 for i in range(self.list_steps.count())]
+        self.flow.steps = [by_id[i] for i in order if i in by_id]
+        for i in range(self.list_steps.count()):
+            s = by_id[self.list_steps.item(i).data(Qt.UserRole)]
+            self.list_steps.item(i).setText(f"{i + 1}. {s.label()}")
 
     def _move_step(self, delta: int) -> None:
         row = self.list_steps.currentRow()

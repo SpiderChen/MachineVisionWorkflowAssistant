@@ -34,6 +34,7 @@ CONFIG_PATH = ROOT_DIR / "config.yaml"
 TEMPLATES_DIR = ROOT_DIR / "templates"
 LOGS_DIR = ROOT_DIR / "logs"
 SNAPSHOTS_DIR = LOGS_DIR / "snapshots"
+DB_SEEN_PATH = ROOT_DIR / "db_seen.sqlite"   # 只读模式的本机去重库（不碰客户系统）
 KEYRING_SERVICE = "AutoPrintDeliveryOrder"
 
 
@@ -44,7 +45,8 @@ class EngineCfg:
     task_retries: int = 1                # 单任务失败重试次数
     max_consecutive_failures: int = 3    # 连续失败熔断阈值，连败即暂停引擎
     step_timeout: float = 10.0           # 每步等待元素出现的超时（秒）
-    state_retries: int = 3               # 页面状态识别重试次数（之后 F5 再试一轮）
+    dispatch_timeout: float = 120.0      # 反应式派发单任务总超时（无进展多久判失败）
+    state_retries: int = 3               # 页面状态识别重试次数（保留，供手动诊断/兼容）
     refresh_wait: float = 3.0            # F5 刷新后等待页面加载秒数
     verify_input: bool = True            # 流程④：注入后 OCR 回读校验
     verify_success: bool = False         # 流程⑥：打印成功特征校验（页面无可靠反馈保持 false）
@@ -54,11 +56,37 @@ class EngineCfg:
 
 @dataclass
 class DbCfg:
+    """数据库轮询触发。装机时直接写 SQL 适配任意库表/视图/存储过程，程序不假设 schema。
+
+    数据库类型由连接串前缀决定（db_type 仅作 UI 填充连接串/SQL 模板的助手）：
+    SQL Server=mssql+pyodbc://  MySQL=mysql+pymysql://  PG=postgresql+psycopg://
+    Oracle=oracle+oracledb://  SQLite=sqlite:///。
+
+    默认**只读模式**（writeback=False）：对客户库只执行 sql_poll 一条 SELECT，客户只需给只读账号；
+    「已处理」状态记在本机 db_seen.sqlite（主键去重），完全不改动对方业务表 —— 不入侵别人系统。
+    仅当客户明确授权回写时才开 writeback：每轮对每行执行 sql_claim 抢占（rowcount>0 才算抢到，
+    防多实例重复消费）→ 入队执行 → 完成后按结果执行 sql_success / sql_fail 回写。
+    两种模式下 sql_poll 的**前两列须为 主键、车辆自编号**。
+    绑定参数（自动注入、防注入）：:id=主键，:vehicle_no=车号，:err=失败原因。
+    """
+
     enabled: bool = False
+    db_type: str = "mssql"               # 连接串/SQL 模板填充助手；真实驱动以连接串为准
     url: str = "mssql+pyodbc://user:pass@host/db?driver=ODBC+Driver+17+for+SQL+Server"
+    writeback: bool = False              # 是否回写对方库（默认只读，本机 db_seen.sqlite 去重）
     poll_interval: float = 3.0
-    batch: int = 5
-    table: str = "print_task"
+    batch: int = 5                       # 每轮最多处理条数（Python 侧截断，规避方言差异）
+    flow: str = "print_order"            # 该来源的任务走哪个流程（流程编排页 key）
+    sql_poll: str = (
+        "SELECT id, vehicle_no FROM print_task WHERE status = 0 ORDER BY id")
+    sql_claim: str = (
+        "UPDATE print_task SET status = 1, updated_at = GETDATE() "
+        "WHERE id = :id AND status = 0")
+    sql_success: str = (
+        "UPDATE print_task SET status = 2, updated_at = GETDATE() WHERE id = :id")
+    sql_fail: str = (
+        "UPDATE print_task SET status = 3, err_msg = :err, updated_at = GETDATE() "
+        "WHERE id = :id")
 
 
 @dataclass

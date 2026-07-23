@@ -18,9 +18,9 @@ import cv2
 from PySide6.QtCore import QObject, QRect, QTimer, Qt, Signal
 from PySide6.QtGui import QGuiApplication, QImage, QPainter, QPixmap
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout, QHBoxLayout, QInputDialog,
-    QLabel, QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit, QPushButton,
-    QSpinBox, QSplitter, QTabWidget, QVBoxLayout, QWidget,
+    QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout, QHBoxLayout,
+    QInputDialog, QLabel, QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit,
+    QPushButton, QSpinBox, QSplitter, QTabWidget, QVBoxLayout, QWidget,
 )
 
 from .. import locators
@@ -32,6 +32,26 @@ from ..vision import draw_result
 from .flow_tab import FlowTab
 
 logger = logging.getLogger(__name__)
+
+# 数据库类型 → (显示名, 连接串示例, 时间函数)。db_type 仅作填充助手，真实驱动看连接串。
+DB_TYPES = {
+    "mssql": ("SQL Server", "mssql+pyodbc://user:pass@host/db?driver=ODBC+Driver+17+for+SQL+Server", "GETDATE()"),
+    "mysql": ("MySQL", "mysql+pymysql://user:pass@host:3306/db", "NOW()"),
+    "postgresql": ("PostgreSQL", "postgresql+psycopg://user:pass@host:5432/db", "NOW()"),
+    "oracle": ("Oracle", "oracle+oracledb://user:pass@host:1521/?service_name=orcl", "SYSDATE"),
+    "sqlite": ("SQLite", "sqlite:///print_task.db", "CURRENT_TIMESTAMP"),
+}
+
+
+def default_sql(db_type: str) -> dict:
+    """按数据库类型生成 4 段默认 SQL（仅时间函数按方言不同）。"""
+    now = DB_TYPES.get(db_type, DB_TYPES["mssql"])[2]
+    return {
+        "poll": "SELECT id, vehicle_no FROM print_task WHERE status = 0 ORDER BY id",
+        "claim": f"UPDATE print_task SET status = 1, updated_at = {now} WHERE id = :id AND status = 0",
+        "success": f"UPDATE print_task SET status = 2, updated_at = {now} WHERE id = :id",
+        "fail": f"UPDATE print_task SET status = 3, err_msg = :err, updated_at = {now} WHERE id = :id",
+    }
 
 
 def open_folder(path) -> None:
@@ -144,6 +164,7 @@ class ConfigWindow(QMainWindow):
 
         self.tabs = QTabWidget()
         self.tabs.addTab(self._build_basic_tab(), "基础")
+        self.tabs.addTab(self._build_db_tab(), "数据库触发")
         self.flow_tab = FlowTab(settings, vision, engine, self._capture_hidden)
         self.tabs.addTab(self.flow_tab, "流程编排")
         self.live_tab = self._build_live_tab()
@@ -151,6 +172,7 @@ class ConfigWindow(QMainWindow):
         self.tabs.addTab(self._build_cred_tab(), "登录凭据")
         self.setCentralWidget(self.tabs)
         self._load_basic()
+        self._load_db()
         self._wire_live()      # 订阅引擎事件总线 + 挂实时日志 handler + 空闲底图心跳
 
     # 托盘应用：关窗仅隐藏
@@ -168,9 +190,6 @@ class ConfigWindow(QMainWindow):
 
         self.chk_run = QCheckBox("执行引擎运行中")
         self.chk_auto_login = QCheckBox("自动登录（默认关，README §5）")
-        self.chk_db = QCheckBox("启用数据库轮询触发")
-        self.le_db_url = QLineEdit()
-        self.sb_poll = QDoubleSpinBox(); self.sb_poll.setRange(1.0, 300.0); self.sb_poll.setSuffix(" s")
         self.chk_api = QCheckBox("启用 HTTP API 触发（改动重启后生效）")
         self.le_api_host = QLineEdit()
         self.sb_api_port = QSpinBox(); self.sb_api_port.setRange(1, 65535)
@@ -184,9 +203,6 @@ class ConfigWindow(QMainWindow):
 
         form.addRow(self.chk_run)
         form.addRow(self.chk_auto_login)
-        form.addRow(self.chk_db)
-        form.addRow("DB 连接串", self.le_db_url)
-        form.addRow("轮询间隔", self.sb_poll)
         form.addRow(self.chk_api)
         form.addRow("API 监听地址", self.le_api_host)
         form.addRow("API 端口", self.sb_api_port)
@@ -202,13 +218,170 @@ class ConfigWindow(QMainWindow):
         form.addRow(btn)
         return w
 
+    # ------------------------------------------------------------------
+    # Tab 数据库触发（直接写 SQL 适配任意库表/视图/存储过程）
+    # ------------------------------------------------------------------
+
+    def _build_db_tab(self) -> QWidget:
+        w = QWidget()
+        form = QFormLayout(w)
+
+        self.chk_db = QCheckBox("启用数据库轮询触发（改动需重启程序生效）")
+        self.cmb_db_type = QComboBox()
+        for key, (label, _url, _now) in DB_TYPES.items():
+            self.cmb_db_type.addItem(label, key)
+        self.le_db_url = QLineEdit()
+        self.sb_poll = QDoubleSpinBox(); self.sb_poll.setRange(1.0, 300.0); self.sb_poll.setSuffix(" s")
+        self.sb_db_batch = QSpinBox(); self.sb_db_batch.setRange(1, 500)
+        self.cmb_db_flow = QComboBox()
+        self.chk_db_writeback = QCheckBox(
+            "回写对方数据库（默认关闭＝只读，仅在客户授权写权限时勾选）")
+        self.chk_db_writeback.toggled.connect(self._on_writeback_toggled)
+        self.txt_sql_poll = self._sql_edit()
+        self.txt_sql_claim = self._sql_edit()
+        self.txt_sql_success = self._sql_edit()
+        self.txt_sql_fail = self._sql_edit()
+
+        form.addRow(self.chk_db)
+        type_row = QHBoxLayout()
+        type_row.addWidget(self.cmb_db_type)
+        btn_fill = QPushButton("按类型填充连接串/SQL 模板")
+        btn_fill.clicked.connect(self._fill_db_defaults)
+        type_row.addWidget(btn_fill); type_row.addStretch()
+        tr = QWidget(); tr.setLayout(type_row)
+        form.addRow("数据库类型", tr)
+        form.addRow("连接串", self.le_db_url)
+        form.addRow("轮询间隔", self.sb_poll)
+        form.addRow("单批最多处理", self.sb_db_batch)
+        form.addRow("触发任务走的流程", self.cmb_db_flow)
+        form.addRow(self.chk_db_writeback)
+
+        help_lbl = QLabel(
+            "只读模式（推荐，默认）：每轮只跑「捞取」这一条 SELECT，客户只需给只读账号；"
+            "「已处理」记在本机 db_seen.sqlite 按主键去重，完全不改动对方业务表。\n"
+            "回写模式（需客户授权写权限）：捞取 →「抢占」(rowcount>0 才算抢到，防多实例重复) "
+            "→ 入队执行 → 完成后按结果跑「成功/失败」回写（下方三条 SQL 仅此模式生效）。\n"
+            "① 捞取 SQL 的前两列必须是「主键、车辆自编号」；② 占位符（参数化防注入）："
+            ":id = 主键、:vehicle_no = 车号、:err = 失败原因。\n"
+            "表名 / 状态值 / 联表 / 视图 / 存储过程都写在 SQL 里，程序不假设任何 schema。")
+        help_lbl.setWordWrap(True)
+        help_lbl.setTextFormat(Qt.PlainText)
+        help_lbl.setStyleSheet("color:#666; padding:4px;")
+        form.addRow(help_lbl)
+        form.addRow("捞取待处理", self.txt_sql_poll)
+        form.addRow("抢占 (:id)", self.txt_sql_claim)
+        form.addRow("成功回写 (:id)", self.txt_sql_success)
+        form.addRow("失败回写 (:id,:err)", self.txt_sql_fail)
+
+        btns = QHBoxLayout()
+        btn_test = QPushButton("测试连接 / 试跑捞取")
+        btn_test.clicked.connect(self._test_db_conn)
+        btn_save = QPushButton("保存")
+        btn_save.clicked.connect(self._save_db)
+        btns.addWidget(btn_test); btns.addWidget(btn_save); btns.addStretch()
+        bw = QWidget(); bw.setLayout(btns)
+        form.addRow(bw)
+        return w
+
+    def _on_writeback_toggled(self, on: bool) -> None:
+        # 只读模式下回写三条 SQL 用不到，禁用以示区分（捞取 SQL 两种模式都要，不禁用）
+        for e in (self.txt_sql_claim, self.txt_sql_success, self.txt_sql_fail):
+            e.setEnabled(on)
+
+    @staticmethod
+    def _sql_edit() -> QPlainTextEdit:
+        e = QPlainTextEdit()
+        e.setMaximumHeight(60)
+        e.setLineWrapMode(QPlainTextEdit.NoWrap)
+        return e
+
+    def _fill_db_defaults(self) -> None:
+        key = self.cmb_db_type.currentData()
+        nonempty = any(t.toPlainText().strip() for t in (
+            self.txt_sql_poll, self.txt_sql_claim, self.txt_sql_success, self.txt_sql_fail))
+        if self.le_db_url.text().strip() or nonempty:
+            if QMessageBox.question(
+                    self, "覆盖确认",
+                    "将用所选类型的示例连接串与默认 SQL 覆盖当前内容，继续？") != QMessageBox.Yes:
+                return
+        self.le_db_url.setText(DB_TYPES[key][1])
+        sql = default_sql(key)
+        self.txt_sql_poll.setPlainText(sql["poll"])
+        self.txt_sql_claim.setPlainText(sql["claim"])
+        self.txt_sql_success.setPlainText(sql["success"])
+        self.txt_sql_fail.setPlainText(sql["fail"])
+
+    def _load_db(self) -> None:
+        s = self.settings
+        self.chk_db.setChecked(s.db.enabled)
+        idx = self.cmb_db_type.findData(s.db.db_type)
+        self.cmb_db_type.setCurrentIndex(idx if idx >= 0 else 0)
+        self.le_db_url.setText(s.db.url)
+        self.sb_poll.setValue(s.db.poll_interval)
+        self.sb_db_batch.setValue(s.db.batch)
+        self.cmb_db_flow.clear()
+        keys = list(self.engine.flows.flows.keys())
+        if s.db.flow and s.db.flow not in keys:
+            keys.insert(0, s.db.flow)
+        for k in keys:
+            fl = self.engine.flows.flows.get(k)
+            self.cmb_db_flow.addItem(fl.title if fl else k, k)
+        fidx = self.cmb_db_flow.findData(s.db.flow)
+        if fidx >= 0:
+            self.cmb_db_flow.setCurrentIndex(fidx)
+        self.chk_db_writeback.setChecked(s.db.writeback)
+        self._on_writeback_toggled(s.db.writeback)
+        self.txt_sql_poll.setPlainText(s.db.sql_poll)
+        self.txt_sql_claim.setPlainText(s.db.sql_claim)
+        self.txt_sql_success.setPlainText(s.db.sql_success)
+        self.txt_sql_fail.setPlainText(s.db.sql_fail)
+
+    def _collect_db(self) -> None:
+        s = self.settings
+        s.db.enabled = self.chk_db.isChecked()
+        s.db.db_type = self.cmb_db_type.currentData() or "mssql"
+        s.db.url = self.le_db_url.text().strip()
+        s.db.poll_interval = self.sb_poll.value()
+        s.db.batch = self.sb_db_batch.value()
+        s.db.flow = self.cmb_db_flow.currentData() or "print_order"
+        s.db.writeback = self.chk_db_writeback.isChecked()
+        s.db.sql_poll = self.txt_sql_poll.toPlainText().strip()
+        s.db.sql_claim = self.txt_sql_claim.toPlainText().strip()
+        s.db.sql_success = self.txt_sql_success.toPlainText().strip()
+        s.db.sql_fail = self.txt_sql_fail.toPlainText().strip()
+
+    def _save_db(self) -> None:
+        self._collect_db()
+        self.settings.save()
+        QMessageBox.information(
+            self, "已保存", "数据库触发配置已保存。\n启用/连接串/SQL 改动需重启程序生效。")
+
+    def _test_db_conn(self) -> None:
+        """只读试跑「捞取」SQL：验证连接串与查询是否可用（不抢占、不改数据）。"""
+        url = self.le_db_url.text().strip()
+        sql = self.txt_sql_poll.toPlainText().strip()
+        if not url or not sql:
+            QMessageBox.warning(self, "提示", "请先填写连接串与「捞取待处理」SQL")
+            return
+        try:
+            import sqlalchemy as sa
+
+            eng = sa.create_engine(url, pool_pre_ping=True)
+            with eng.connect() as conn:
+                rows = conn.execute(sa.text(sql)).fetchmany(5)
+            eng.dispose()
+        except Exception as e:
+            QMessageBox.warning(self, "连接/查询失败", str(e))
+            return
+        sample = "\n".join(f"  {r[0]} | {r[1]}" for r in rows) if rows else "  （当前无待处理行）"
+        QMessageBox.information(
+            self, "连接成功",
+            f"「捞取」SQL 可执行，前几条（主键 | 车号）：\n{sample}")
+
     def _load_basic(self) -> None:
         s = self.settings
         self.chk_run.setChecked(not self.engine.paused)
         self.chk_auto_login.setChecked(s.engine.auto_login)
-        self.chk_db.setChecked(s.db.enabled)
-        self.le_db_url.setText(s.db.url)
-        self.sb_poll.setValue(s.db.poll_interval)
         self.chk_api.setChecked(s.api.enabled)
         self.le_api_host.setText(s.api.host)
         self.sb_api_port.setValue(s.api.port)
@@ -223,9 +396,6 @@ class ConfigWindow(QMainWindow):
         s = self.settings
         s.engine.enabled = self.chk_run.isChecked()
         s.engine.auto_login = self.chk_auto_login.isChecked()
-        s.db.enabled = self.chk_db.isChecked()
-        s.db.url = self.le_db_url.text().strip()
-        s.db.poll_interval = self.sb_poll.value()
         s.api.enabled = self.chk_api.isChecked()
         s.api.host = self.le_api_host.text().strip() or "127.0.0.1"
         s.api.port = self.sb_api_port.value()
@@ -239,7 +409,7 @@ class ConfigWindow(QMainWindow):
         self.engine.set_running(s.engine.enabled)
         QMessageBox.information(
             self, "已保存",
-            "配置已保存。\n运行/自动登录等开关立即生效；DB 连接与 API 端口改动需重启程序。")
+            "配置已保存。\n运行/自动登录等开关立即生效；API 端口改动需重启程序。")
 
     # ------------------------------------------------------------------
     # Tab 3 运行实况（实时画面 + 步骤横幅 + 实时日志 + 内置手动定位诊断）
@@ -397,9 +567,26 @@ class ConfigWindow(QMainWindow):
         self._update_engine_state()
 
     def _show_pixmap(self, img_bgr) -> None:
+        # 全黑帧检测：mss 在 WSL/WSLg（X11 抓屏拿到黑帧）或 macOS 未授权「屏幕录制」
+        # 时会返回近纯黑的一帧。此时不画黑块，改显示原因提示 + 打一次 warning。
+        if float(img_bgr.max()) < 8:
+            self._show_black_hint()
+            return
+        self._black_warned = False
         pix = np_to_pixmap(img_bgr)
         self.preview.setPixmap(pix.scaled(
             self.preview.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
+
+    def _show_black_hint(self) -> None:
+        self.preview.setText(
+            "截屏为全黑帧。\n\n"
+            "· WSL/WSLg 里跑 GUI：X11 抓屏拿不到真实画面，属开发机现象，\n"
+            "  打包成 Windows exe 在真机上正常。\n"
+            "· macOS：系统设置 → 隐私与安全性 → 屏幕录制 勾选本程序后重启程序。")
+        if not getattr(self, "_black_warned", False):
+            logging.getLogger(__name__).warning(
+                "截屏为全黑帧（WSL 抓屏 / macOS 未授权屏幕录制？），已跳过预览渲染")
+            self._black_warned = True
 
     def _selected_locator_name(self) -> str | None:
         return self.cmb_locator.currentData()
