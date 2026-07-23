@@ -111,8 +111,20 @@ def _run_service(settings, vision, inputs, engine, headless: bool) -> int:
         quit_app = Signal()
 
     app = QApplication(sys.argv)
-    app.setQuitOnLastWindowClosed(False)
     win = ConfigWindow(settings, vision, engine)
+    if sys.platform == "darwin":
+        # macOS 不用 pystray 菜单栏（AppKit 要求主线程、依赖 pyobjc），直接把配置窗口
+        # 作为主界面常驻；引擎 / DB 轮询 / HTTP API 已在本函数前面启动。
+        app.setQuitOnLastWindowClosed(True)
+        win.closeEvent = lambda e: e.accept()
+        win.showNormal()
+        win.raise_()
+        win.activateWindow()
+        logger.info("macOS：以配置窗口模式运行（无菜单栏托盘）")
+        rc = app.exec()
+        shutdown()
+        return rc
+    app.setQuitOnLastWindowClosed(False)
     bridge = Bridge()
     bridge.open_config.connect(lambda: (win.showNormal(), win.raise_(), win.activateWindow()))
     bridge.test_print.connect(win.prompt_test_print)

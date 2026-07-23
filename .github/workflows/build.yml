@@ -1,4 +1,4 @@
-name: Build Windows EXE
+name: Build App (Windows + macOS)
 
 on:
   push:
@@ -10,27 +10,21 @@ permissions:
   contents: write # 打 v* tag 时创建 Release 需要写权限
 
 jobs:
-  build:
+  build-windows:
     runs-on: windows-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: pip
-
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip wheel
           pip install -r requirements.txt
           pip install pyinstaller
-
       - name: Build EXE
         run: pyinstaller MachineVisionWorkflowAssistant.spec --noconfirm --clean
-
       - name: Assemble release bundle
         shell: pwsh
         run: |
@@ -41,28 +35,73 @@ jobs:
           Copy-Item README.md $rel/
           Copy-Item -Recurse samples $rel/samples
           Compress-Archive -Path "$rel/*" -DestinationPath "release/MachineVisionWorkflowAssistant-windows.zip" -Force
-
       - name: Upload EXE artifact
         uses: actions/upload-artifact@v4
         with:
-          name: MachineVisionWorkflowAssistant-exe
+          name: MachineVisionWorkflowAssistant-windows-exe
           path: dist/MachineVisionWorkflowAssistant.exe
           if-no-files-found: error
-
-      - name: Upload release bundle
+      - name: Upload Windows bundle
         uses: actions/upload-artifact@v4
         with:
           name: MachineVisionWorkflowAssistant-windows-bundle
           path: release/MachineVisionWorkflowAssistant-windows.zip
           if-no-files-found: error
 
-      - name: Publish Release (on v* tag)
-        if: startsWith(github.ref, 'refs/tags/v')
-        shell: pwsh
+  build-macos:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-13 # Intel x86_64
+            arch: intel
+          - os: macos-14 # Apple Silicon arm64
+            arch: arm64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip wheel
+          pip install -r requirements.txt
+          pip install "pyobjc-framework-Cocoa" "pyobjc-framework-Quartz"
+          pip install pyinstaller
+      - name: Build .app
+        run: pyinstaller MachineVisionWorkflowAssistant.spec --noconfirm --clean
+      - name: Ad-hoc codesign (无开发者证书，仅让 Gatekeeper 少报错)
+        run: codesign --force --deep --sign - "dist/MachineVisionWorkflowAssistant.app" || true
+      - name: Zip .app bundle
+        run: |
+          cd dist
+          ditto -c -k --sequesterRsrc --keepParent \
+            "MachineVisionWorkflowAssistant.app" \
+            "../MachineVisionWorkflowAssistant-macos-${{ matrix.arch }}.zip"
+      - name: Upload .app artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MachineVisionWorkflowAssistant-macos-${{ matrix.arch }}
+          path: MachineVisionWorkflowAssistant-macos-${{ matrix.arch }}.zip
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build-windows, build-macos]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Publish Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create $env:GITHUB_REF_NAME `
-            dist/MachineVisionWorkflowAssistant.exe `
-            release/MachineVisionWorkflowAssistant-windows.zip `
-            --title $env:GITHUB_REF_NAME --generate-notes
+          gh release create "$GITHUB_REF_NAME" \
+            artifacts/*/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes

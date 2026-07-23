@@ -32,8 +32,23 @@ def _report_crash(exc_type, exc, tb) -> None:
             pass
 
 
+def _ensure_std_streams() -> None:
+    """无控制台窗口的 exe 里 sys.stdout / sys.stderr 为 None，任何库一旦 stdout.isatty()
+    或 write() 就崩（uvicorn 彩色日志、click 等）。把缺失的标准流指到 devnull（真实文件
+    对象：isatty() 返回 False、write 丢弃），避免整类 'NoneType has no attribute ...' 崩溃。"""
+    for name, mode in (("stdin", "r"), ("stdout", "w"), ("stderr", "w")):
+        if getattr(sys, name, None) is None:
+            try:
+                setattr(sys, name, open(os.devnull, mode))
+            except Exception:
+                pass
+
+
 def main() -> int:
+    _ensure_std_streams()
     sys.excepthook = _report_crash
+    # macOS 从 Finder 启动 .app 时，旧系统会塞入 -psn_xxx 参数，argparse 不认会直接退出
+    sys.argv = [a for a in sys.argv if not a.startswith("-psn_")]
     try:
         from app.main import main as app_main
 

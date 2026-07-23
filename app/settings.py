@@ -19,10 +19,15 @@ except ImportError:  # 允许无 keyring 的开发环境导入本模块
 
 logger = logging.getLogger(__name__)
 
-# 打包为 exe（PyInstaller，sys.frozen）后，运行根目录取 exe 所在目录，让 config.yaml /
-# logs / templates / flows.yaml 落在 exe 旁边（用户可编辑、可持久化）；源码运行取仓库根。
+# 打包后（PyInstaller，sys.frozen）运行根目录：
+#   Windows → exe 所在目录（config.yaml / logs / templates / flows.yaml 落 exe 旁，可编辑）
+#   macOS   → ~/Library/Application Support/MachineVisionWorkflowAssistant（.app 包内不宜写文件）
+# 源码运行 → 仓库根目录。
 if getattr(sys, "frozen", False):
-    ROOT_DIR = Path(sys.executable).resolve().parent
+    if sys.platform == "darwin":
+        ROOT_DIR = Path.home() / "Library" / "Application Support" / "MachineVisionWorkflowAssistant"
+    else:
+        ROOT_DIR = Path(sys.executable).resolve().parent
 else:
     ROOT_DIR = Path(__file__).resolve().parent.parent
 CONFIG_PATH = ROOT_DIR / "config.yaml"

@@ -63,8 +63,11 @@ class ApiServer:
         import uvicorn
 
         app = create_app(self.engine, self.s)
+        # log_config=None：不让 uvicorn 套用自带的彩色日志配置——打包成无控制台 exe 后
+        # sys.stdout 为 None，其 ColourizedFormatter 会调用 sys.stdout.isatty() 直接崩；
+        # 关掉后 uvicorn 日志走本项目已配置的根 logger（落到 app.log）。
         config = uvicorn.Config(app, host=self.s.api.host, port=self.s.api.port,
-                                log_level="warning")
+                                log_level="warning", log_config=None, use_colors=False)
         self._server = uvicorn.Server(config)
         # 非主线程运行，不装信号处理器
         self._server.install_signal_handlers = lambda: None
