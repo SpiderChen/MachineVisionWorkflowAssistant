@@ -1,0 +1,27 @@
+# 运行环境：Windows 10/11，Python 3.10+（README §2）
+# 视觉与输入内核
+mss                                  # 快速截屏，多显示器
+opencv-python                        # 模板匹配 / 图像处理
+numpy
+rapidocr-onnxruntime                 # OCR 文字锚点（ONNX，CPU 即可）
+pynput                               # 非 Windows 开发环境的输入降级后端
+pywin32; sys_platform == "win32"     # 窗口激活 / 剪贴板
+Pillow                               # 托盘图标绘制
+
+# 托盘与配置界面
+pystray
+PySide6
+
+# 触发源
+fastapi
+uvicorn
+SQLAlchemy>=2.0
+pyodbc; sys_platform == "win32"      # SQL Server 主力驱动（其他库装对应驱动即可）
+requests                             # 结果回调
+
+# 配置与凭据
+PyYAML
+keyring                              # Windows 凭据管理器（DPAPI）
+
+# 打包（M5）
+# pyinstaller

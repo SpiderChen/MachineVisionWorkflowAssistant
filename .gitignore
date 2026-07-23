@@ -1,0 +1,27 @@
+# Python 缓存与虚拟环境
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+*.egg-info/
+
+# PyInstaller 构建产物
+build/
+dist/
+release/
+*.manifest
+
+# 运行期在用户机器上生成的文件（不入库）
+logs/
+flows.yaml
+flows_assets/*
+!flows_assets/.gitkeep
+templates/*.png
+startup_error.log
+
+# 编辑器 / 系统
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

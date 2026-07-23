@@ -1,0 +1,27 @@
+# AutoPrintDeliveryOrder 运行参数
+# 元素定位定义在 app/locators.py（代码维护，不进配置）；登录凭据在系统凭据管理器（配置页写入）
+engine:
+  enabled: true              # 启动后是否立即运行执行引擎
+  auto_login: false          # 自动登录总开关（README §5，默认关）
+  task_retries: 1            # 单任务失败重试次数
+  max_consecutive_failures: 3  # 连续失败熔断阈值，连败即暂停引擎并告警
+  step_timeout: 10.0         # 每步等待元素出现的超时（秒）
+  state_retries: 3           # 页面状态识别重试次数（之后 F5 刷新再试一轮）
+  refresh_wait: 3.0          # F5 后等待页面加载秒数
+  verify_input: true         # 流程④：注入后 OCR 回读校验车辆自编号
+  verify_success: false      # 流程⑥：打印成功特征校验（页面无可靠反馈保持 false）
+  monitor: 1                 # 目标显示器编号（mss，1=主屏）
+  window_title: ""           # 浏览器窗口标题包含串；非空则执行前激活并最大化该窗口
+db:
+  enabled: false
+  url: "mssql+pyodbc://user:pass@host/db?driver=ODBC+Driver+17+for+SQL+Server"
+  poll_interval: 3.0
+  batch: 5
+  table: print_task
+api:
+  enabled: true
+  host: 127.0.0.1
+  port: 18080
+  token: ""                  # 非空则要求 Authorization: Bearer <token>
+log:
+  level: INFO
