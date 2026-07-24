@@ -478,16 +478,21 @@ class Engine:
             raise StepError("验证码步骤需要框选定位目标（输入框），无法计算图片区域")
         c = res.chosen
 
-        # 动态算式定位已经拿到当前 OCR 文本，直接计算；
-        # 不再二次裁剪/OCR，避免蓝框轻微偏移导致「定位成功但无法解析」。
-        loc = res.locator
-        if (isinstance(loc, L.TextLocator) and loc.match == L.Match.ARITH
-                and not res.used_fallback):
-            direct = parse_arith(c.text or "")
-            if direct is not None:
-                answer, expr = direct
-                logger.info("验证码动态锚点 %s → %s", expr, answer)
-                return answer
+        # 如果保存了验证码算式锚点，优先直接用它定位并解析，不再二次裁剪/OCR。
+        # 这不会影响主输入框定位；主定位仍由 res.chosen 负责。
+        captcha_loc = step.captcha_locator
+        if captcha_loc is not None and not res.used_fallback:
+            try:
+                qres = self.vision.locate(captcha_loc.to_locator(
+                    f"step:{step.label()}.captcha"), res.shot)
+            except Exception:
+                qres = None
+            if qres is not None and qres.ok and qres.chosen is not None:
+                direct = parse_arith(qres.chosen.text or "")
+                if direct is not None:
+                    answer, expr = direct
+                    logger.info("验证码动态锚点 %s → %s", expr, answer)
+                    return answer
 
         H, W = res.shot.img.shape[:2]
 

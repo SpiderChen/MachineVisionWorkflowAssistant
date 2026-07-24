@@ -429,10 +429,15 @@ class FlowTab(QWidget):
                     lines.append("已限定搜索区域消歧")
                 if sl.template:
                     lines.append("失败自动降级图像模板")
+                if s.value_source == "captcha" and s.captcha_locator is not None:
+                    lines.append("验证码题目动态锚点")
                 return "；".join(lines)
             return "图像模板匹配定位（T2）"
         if s.ref:
-            return f"使用内置注册元素 {s.ref} 定位；在此页重新框选可覆盖为本机标注"
+            msg = f"使用内置注册元素 {s.ref} 定位；在此页重新框选可覆盖为本机标注"
+            if s.value_source == "captcha" and s.captcha_locator is not None:
+                msg += "；验证码题目动态锚点"
+            return msg
         return "⚠ 尚未框选目标：请截屏后在图上拖框"
 
     def _load_step_canvas(self) -> None:
@@ -575,6 +580,10 @@ class FlowTab(QWidget):
         s = self.step
         shot = self._shot
 
+        # 先立即回显用户框选的蓝框，避免后台 OCR 还没跑完时看起来“没有反应”。
+        self.canvas.set_annotation(s.box, s.click, box)
+        self.lbl_hint.setText("验证码区域已框选，正在识别算术题…")
+
         def _work():
             loc = s.build_locator()
             res = self.vision.locate(loc, shot) if loc is not None else None
@@ -597,11 +606,13 @@ class FlowTab(QWidget):
         def _done(result):
             ratio, got, dynamic_locator = result
             if dynamic_locator is not None:
-                s.locator = dynamic_locator
-                s.ref = ""
+                s.captcha_locator = dynamic_locator
             s.captcha_box = [int(v) for v in box]
             s.captcha_ratio = ratio
             self.canvas.set_annotation(s.box, s.click, s.captcha_box)
+            if self.flow is not None and s in self.flow.steps:
+                row = self.flow.steps.index(s)
+                self._refresh_steps(keep_row=row)
             extra = (f"试识别：{got[1]} = {got[0]} ✔" if got
                      else "⚠ 试识别失败：当前图上未解析出算术题（真实页面上再测）")
             mode = ("已启用动态算式锚点（题目变化无需重新标注）"

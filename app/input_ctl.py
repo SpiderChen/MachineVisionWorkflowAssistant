@@ -243,38 +243,43 @@ class _PynputBackend:
 
 
 class _DummyBackend:
-    """无显示环境（CI/WSL 无 X）：只记日志，便于走通流程调试。"""
+    """无显示环境（CI/WSL 无 X）：不能伪装成已完成真实键鼠动作。"""
+
+    _ERROR = (
+        "当前运行环境没有可用的系统输入后端，无法点击或输入。"
+        "如果目标页面运行在 Windows，请使用 Windows Python 或 Windows exe 启动程序，"
+        "不要从 WSL 启动。"
+    )
 
     def __init__(self):
         self._pos = (0, 0)
 
     def move_to(self, x, y):
-        self._pos = (x, y)
-        logger.info("[dummy] move_to(%s, %s)", x, y)
+        raise InputError(self._ERROR)
 
     def click_down_up(self):
-        logger.info("[dummy] click at %s", (self._pos,))
+        raise InputError(self._ERROR)
 
     def right_down_up(self):
-        logger.info("[dummy] right click at %s", (self._pos,))
+        raise InputError(self._ERROR)
 
     def cursor_pos(self):
         return self._pos
 
     def key_down(self, vk):
-        logger.info("[dummy] key_down 0x%02X", vk)
+        raise InputError(self._ERROR)
 
     def key_up(self, vk):
-        logger.info("[dummy] key_up 0x%02X", vk)
+        raise InputError(self._ERROR)
 
     def type_text(self, text):
-        logger.info("[dummy] type_text(%r)", text)
+        raise InputError(self._ERROR)
 
     def get_clipboard(self):
         return None
 
     def set_clipboard(self, text):
-        logger.info("[dummy] set_clipboard(%r)", text)
+        raise InputError(self._ERROR)
 
 
 class InputController:
@@ -291,7 +296,7 @@ class InputController:
                 logger.warning("非 Windows 环境，使用 pynput 降级后端（仅供开发调试）")
             except Exception:
                 self.backend = _DummyBackend()
-                logger.warning("无可用输入后端，使用 Dummy（只记日志）")
+                logger.warning("无可用输入后端：真实点击/输入将明确报错")
 
     def click(self, x: int, y: int) -> None:
         """移动 → 校验位置（保险丝）→ 点击。"""

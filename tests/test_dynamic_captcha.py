@@ -1,9 +1,11 @@
 import unittest
+from types import SimpleNamespace
 
 import numpy as np
 
 from app.engine import Engine
 from app.flows import Step, StepLocator, derive_dynamic_arith_locator
+from app.input_ctl import InputController, InputError, _DummyBackend
 from app.locators import Match, TextLocator
 from app.vision import Candidate, LocateResult, Screenshot, _text_matches
 
@@ -31,6 +33,18 @@ class DynamicCaptchaTests(unittest.TestCase):
 
         self.assertEqual(restored.match, "arith")
         self.assertEqual(restored.to_locator().match, Match.ARITH)
+
+    def test_captcha_locator_roundtrips_separately_from_input_locator(self):
+        base = StepLocator(kind="text", anchor="用户名", match="exact")
+        captcha = StepLocator(kind="text", anchor="0*9=?", match="arith")
+        step = Step(action="input", value_source="captcha",
+                    locator=base, captcha_locator=captcha)
+
+        restored = Step.from_dict(step.to_dict())
+
+        self.assertEqual(restored.locator.anchor, "用户名")
+        self.assertEqual(restored.captcha_locator.anchor, "0*9=?")
+        self.assertEqual(restored.captcha_locator.match, "arith")
 
     def test_old_exact_captcha_anchor_is_migrated(self):
         step = Step.from_dict({
@@ -62,17 +76,89 @@ class DynamicCaptchaTests(unittest.TestCase):
 
     def test_engine_calculates_directly_from_dynamic_anchor(self):
         engine = Engine.__new__(Engine)
-        loc = TextLocator(anchor="0*9=?", match=Match.ARITH)
+        input_loc = TextLocator(anchor="用户名", match=Match.EXACT)
+        captcha_loc = StepLocator(kind="text", anchor="0*9=?", match="arith")
         shot = Screenshot(img=np.zeros((300, 500, 3), dtype=np.uint8))
         res = LocateResult(
-            locator=loc, ok=True,
-            chosen=Candidate(box=(300, 120, 360, 145), text="7+3=?", score=0.99),
+            locator=input_loc, ok=True,
+            chosen=Candidate(box=(100, 120, 160, 145), text="用户名", score=0.99),
             shot=shot,
         )
         step = Step(action="input", value_source="captcha",
+                    locator=StepLocator(kind="text", anchor="用户名", match="exact"),
+                    captcha_locator=captcha_loc,
                     captcha_ratio=[-0.5, -0.5, 0.5, 0.5])
 
+        engine.vision = type("V", (), {
+            "locate": lambda self, loc, shot: LocateResult(
+                locator=loc, ok=True,
+                chosen=Candidate(box=(300, 120, 360, 145), text="7+3=?", score=0.99),
+                shot=shot,
+            )
+        })()
+
         self.assertEqual(engine._solve_captcha(step, res), "10")
+
+    def test_input_step_clicks_answer_field_then_types_calculated_result(self):
+        engine = Engine.__new__(Engine)
+        shot = Screenshot(img=np.zeros((300, 500, 3), dtype=np.uint8))
+        input_res = LocateResult(
+            locator=TextLocator(anchor="验证码", match=Match.EXACT), ok=True,
+            chosen=Candidate(box=(100, 120, 260, 150), text="", score=0.99),
+            click_point=(180, 135), shot=shot,
+        )
+        captcha_res = LocateResult(
+            locator=TextLocator(anchor="0*9=?", match=Match.ARITH), ok=True,
+            chosen=Candidate(box=(300, 120, 360, 145), text="7+3=?", score=0.99),
+            shot=shot,
+        )
+
+        class _Vision:
+            def locate(self, loc, current_shot):
+                return captcha_res
+
+            def to_screen(self, current_shot, point):
+                return point
+
+        class _Inputs:
+            def __init__(self):
+                self.calls = []
+
+            def click(self, x, y):
+                self.calls.append(("click", x, y))
+
+            def select_all_clear(self):
+                self.calls.append(("clear",))
+
+            def type_text(self, value):
+                self.calls.append(("type", value))
+
+        engine.vision = _Vision()
+        engine.inputs = _Inputs()
+        engine.s = SimpleNamespace(engine=SimpleNamespace(verify_input=False))
+        engine._wait_step = lambda step, loc, timeout: input_res
+        engine._emit = lambda *args, **kwargs: None
+        step = Step(
+            action="input", value_source="captcha", clear_first=True,
+            locator=StepLocator(kind="text", anchor="验证码", match="exact"),
+            captcha_locator=StepLocator(kind="text", anchor="0*9=?", match="arith"),
+            captcha_ratio=[-0.5, -0.5, 0.5, 0.5],
+        )
+
+        engine._input_step(step, step.build_locator(), 3.0, {})
+
+        self.assertEqual(engine.inputs.calls, [
+            ("click", 180, 135),
+            ("clear",),
+            ("type", "10"),
+        ])
+
+    def test_dummy_backend_fails_instead_of_reporting_fake_success(self):
+        inputs = InputController.__new__(InputController)
+        inputs.backend = _DummyBackend()
+
+        with self.assertRaisesRegex(InputError, "不要从 WSL 启动"):
+            inputs.click(100, 200)
 
 
 if __name__ == "__main__":

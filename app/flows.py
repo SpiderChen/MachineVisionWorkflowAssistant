@@ -129,6 +129,7 @@ class Step:
     name: str = ""                          # 空则由 label() 自动生成
     ref: str = ""                           # 引用 locators.ALL 注册元素（内置流程）
     locator: StepLocator | None = None      # 框选推导的定位（与 ref 二选一）
+    captcha_locator: StepLocator | None = None  # 验证码图片上的算式锚点（仅 input/captcha）
     # input 专用
     value_source: str = "fixed"             # fixed / vehicle_no / username / password
     text: str = ""                          # value_source=fixed 时的文本
@@ -201,6 +202,8 @@ class Step:
             d["ref"] = self.ref
         if self.locator is not None:
             d["locator"] = self.locator.to_dict()
+        if self.captcha_locator is not None:
+            d["captcha_locator"] = self.captcha_locator.to_dict()
         if self.action == "input":
             d.update(value_source=self.value_source, clear_first=self.clear_first,
                      verify=self.verify)
@@ -232,6 +235,8 @@ class Step:
             action=d.get("action", "click"), id=d.get("id") or _new_id(),
             name=d.get("name", ""), ref=d.get("ref", ""),
             locator=StepLocator.from_dict(d["locator"]) if d.get("locator") else None,
+            captcha_locator=(StepLocator.from_dict(d["captcha_locator"])
+                             if d.get("captcha_locator") else None),
             value_source=d.get("value_source", "fixed"), text=d.get("text", ""),
             clear_first=bool(d.get("clear_first", True)),
             verify=bool(d.get("verify", True)),
