@@ -17,7 +17,7 @@ import numpy as np
 
 from ..qt_compat import (
     QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout, QGroupBox,
-    QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem,
+    QGuiApplication, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem,
     QMenu, QMessageBox, QPlainTextEdit, QPoint, QPushButton, QPixmap, QRect,
     QImage, QPainter, QPen, QColor, QSizePolicy, QSplitter, QToolButton, Qt,
     QVBoxLayout, QWidget, Signal, event_pos, qt_exec,
@@ -28,7 +28,7 @@ from ..flows import (
     FlowError, Step, derive_locator,
 )
 from ..settings import TEMPLATES_DIR
-from ..vision import Screenshot, draw_result
+from ..vision import Screenshot
 from .background import BackgroundTask
 
 logger = logging.getLogger(__name__)
@@ -181,6 +181,7 @@ class FlowTab(QWidget):
         super().__init__()
         self.settings = settings
         self.vision = vision
+        self.engine = engine
         self.store = engine.flows
         self._capture_hidden = capture_hidden    # ConfigWindow._capture_hidden
         self.flow = None
@@ -322,7 +323,7 @@ class FlowTab(QWidget):
         self.txt_report.setMaximumHeight(96)
         self.txt_report.setPlaceholderText("框选后此处显示系统自动推导的定位方式与自检结果")
         form.addRow(self.txt_report)
-        self.btn_test = QPushButton("🎯 测试此步定位（当前屏幕）")
+        self.btn_test = QPushButton("▶ 执行此步动作（当前屏幕）")
         self.btn_test.clicked.connect(self._test_step)
         form.addRow(self.btn_test)
         rv.addWidget(box)
@@ -738,36 +739,67 @@ class FlowTab(QWidget):
         if self.step is None:
             QMessageBox.information(self, "提示", "请先选择一个步骤")
             return
-        if self.step.action not in LOCATOR_ACTIONS:
-            QMessageBox.information(self, "提示", "按键/等待步骤没有定位目标，无需测试")
+        if self._task.busy:
+            QMessageBox.information(self, "正在处理", "上一个 OCR/动作任务尚未完成，请稍候。")
             return
-        try:
-            loc = self.step.build_locator()
-        except FlowError as e:
-            QMessageBox.warning(self, "无法测试", str(e))
+        if self.engine.status()["state"] == "busy":
+            QMessageBox.information(self, "引擎忙碌", "正式任务正在执行，请完成后再测试动作。")
             return
-        if loc is None:
-            QMessageBox.information(self, "提示", "此步骤作用于当前焦点，无定位可测")
-            return
-        try:
-            shot = self._capture_hidden()
-        except Exception as e:
-            QMessageBox.warning(self, "截屏失败", str(e))
-            return
+
+        step = self.step
+        ctx = {}
+        if step.action == "input" and step.value_source == "vehicle_no":
+            text, ok = QInputDialog.getText(self, "动作测试", "测试用车辆自编号：")
+            if not ok:
+                return
+            if not text.strip():
+                QMessageBox.warning(self, "无法执行", "车辆自编号不能为空")
+                return
+            ctx["vehicle_no"] = text.strip()
+
+        title = f"{self.flow.title if self.flow else '未命名流程'} › {step.label()}"
+        top = self.window()
+        self.setEnabled(False)
+        self.lbl_hint.setText(f"正在真实执行「{step.label()}」…")
+        logger.info("开始流程编排动作测试：%s", title)
+        top.hide()
+        QGuiApplication.processEvents()
+        time.sleep(0.5)
 
         def _work():
-            t0 = time.time()
-            res = self.vision.locate(loc, shot)
-            annotated = shot.img.copy()
-            draw_result(annotated, res)
-            return res, annotated, time.time() - t0
+            self.engine.execute_steps_sync(title, [step], ctx)
+            time.sleep(0.2)
+            try:
+                return self.vision.capture(), None
+            except Exception as exc:
+                return None, str(exc)
 
-        def _done(result):
-            res, annotated, elapsed = result
-            self._canvas_preview = True
-            self.canvas.set_image(annotated)
-            self.lbl_hint.setText(
-                "正在显示定位测试结果；重新选择步骤或重新截屏可返回标注")
-            self.txt_report.setPlainText(f"{res.describe()}\n（耗时 {elapsed:.2f}s）")
+        def _finished(result, error):
+            top.show()
+            top.raise_()
+            top.activateWindow()
+            self.setEnabled(True)
+            if error is not None:
+                shot = getattr(error, "shot", None)
+                if shot is not None:
+                    self._canvas_preview = True
+                    self.canvas.set_image(shot.img)
+                self.lbl_hint.setText(f"动作执行失败：{error}")
+                self.txt_report.setPlainText(f"✘ 动作执行失败\n{error}")
+                QMessageBox.warning(self, "动作测试失败", str(error))
+                return
+            final_shot, capture_error = result
+            if final_shot is not None:
+                self._canvas_preview = True
+                self.canvas.set_image(final_shot.img)
+                self.lbl_hint.setText("动作已真实执行；画布显示执行后的屏幕")
+            else:
+                self.lbl_hint.setText("动作已执行，但最终屏幕截取失败")
+            suffix = f"\n执行后截屏失败：{capture_error}" if capture_error else ""
+            self.txt_report.setPlainText(f"✔ 已执行动作\n{step.label()}{suffix}")
 
-        self._run_vision_task("正在初始化 OCR 并测试此步定位…", _work, _done, "测试失败")
+        if not self._task.start("动作测试", _work, _finished):
+            top.show()
+            top.raise_()
+            top.activateWindow()
+            self.setEnabled(True)

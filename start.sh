@@ -6,6 +6,7 @@
 #
 # 用法：
 #   ./start.sh                 # 完整常驻（默认）
+#   ./start.sh --ui            # 无托盘完整模式：UI + 引擎 + DB/API 触发
 #   ./start.sh --headless      # 透传给 run.py：无 UI（仅触发源 + 引擎）
 #   ./start.sh --print A0231   # 透传：命令行执行一单
 #   ./start.sh --locate all    # 透传：定位诊断，标注图存 logs/

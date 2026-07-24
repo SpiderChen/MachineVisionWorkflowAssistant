@@ -155,11 +155,17 @@ def _logs_dir():
 
 
 def _run_config_window(settings, vision, engine) -> int:
-    """直接打开配置窗口（不依赖托盘）。WSL 下配合 QT_QPA_PLATFORM=wayland 使用。"""
+    """无托盘的完整 UI 模式：配置窗口 + 引擎 + DB 轮询 + HTTP API。
+
+    主要给 WSLg、没有系统托盘或不想使用托盘的环境。它与常驻模式一样能够接收
+    DB/API 任务并执行；区别只是关闭配置窗口时整个程序随之退出。
+    """
     import os
 
     from .config_ui import ConfigWindow
     from .qt_compat import QApplication, QFont, QFontDatabase, QT_API, qt_exec
+    from .triggers.api_server import ApiServer
+    from .triggers.db_poller import DbPoller
 
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(True)      # 无托盘：关窗即退出
@@ -172,15 +178,24 @@ def _run_config_window(settings, vision, engine) -> int:
         if fams:
             app.setFont(QFont(fams[0], 10))
     engine.start()
-    win = ConfigWindow(settings, vision, engine)
-    win.closeEvent = lambda e: e.accept()    # 覆盖“关窗仅隐藏”的托盘行为
-    win.showNormal()
-    win.raise_()
-    win.activateWindow()
-    logger.info("配置窗口已打开（%s；--ui 模式，无托盘）", QT_API)
-    rc = qt_exec(app)
-    engine.stop()
-    return rc
+    poller = DbPoller(settings, engine)
+    poller.start()
+    api = ApiServer(settings, engine)
+    try:
+        if settings.api.enabled:
+            api.start()
+
+        win = ConfigWindow(settings, vision, engine)
+        win.closeEvent = lambda e: e.accept()    # 覆盖“关窗仅隐藏”的托盘行为
+        win.showNormal()
+        win.raise_()
+        win.activateWindow()
+        logger.info("配置窗口已打开（%s；--ui 完整工作模式，无托盘）", QT_API)
+        return qt_exec(app)
+    finally:
+        engine.stop()
+        poller.stop()
+        api.stop()
 
 
 def main() -> int:
@@ -192,7 +207,7 @@ def main() -> int:
                         help="命令行测试元素定位后退出")
     parser.add_argument("--headless", action="store_true", help="无托盘/无配置窗口运行")
     parser.add_argument("--ui", action="store_true",
-                        help="直接打开配置窗口（不依赖托盘；WSL 下配合 wayland 调试用）")
+                        help="无托盘完整模式：配置窗口 + 引擎 + DB 轮询 + HTTP API")
     args = parser.parse_args()
 
     from .logger import init_logging

@@ -77,6 +77,7 @@ class Engine:
         self._stop = threading.Event()
         self._paused = not settings.engine.enabled
         self._busy = False
+        self._execution_lock = threading.Lock()  # 正式任务 / CLI / UI 动作测试互斥
         self._consecutive_failures = 0
         self.last_result: TaskResult | None = None
         self._thread: threading.Thread | None = None
@@ -126,7 +127,8 @@ class Engine:
         return size
 
     def status(self) -> dict:
-        state = "paused" if self._paused else ("busy" if self._busy else "idle")
+        state = ("busy" if self._busy or self._execution_lock.locked()
+                 else "paused" if self._paused else "idle")
         return {
             "state": state,
             "queue_size": self.queue.qsize(),
@@ -136,7 +138,43 @@ class Engine:
 
     def execute_sync(self, task: Task) -> TaskResult:
         """同步执行一单（CLI --print，M1 验证核心可行性）。"""
-        return self._execute(task)
+        with self._execution_lock:
+            return self._execute(task)
+
+    def execute_steps_sync(self, flow_title: str, steps: list[Step],
+                           ctx: dict | None = None) -> None:
+        """同步执行 UI 选中的真实动作，与正式流程共用步骤执行器。
+
+        使用非阻塞互斥：正式任务正在跑时，UI 测试直接报错，不与打印任务抢鼠标。
+        """
+        if not steps:
+            raise StepError("没有可执行的步骤")
+        if not self._execution_lock.acquire(blocking=False):
+            raise StepError("引擎正在执行其他任务，请稍候再测试")
+        if self._busy:
+            self._execution_lock.release()
+            raise StepError("正式任务已开始，请完成后再测试")
+        prev = (self._cur_flow, self._cur_idx, self._cur_total)
+        self._cur_flow, self._cur_total = flow_title, len(steps)
+        self._emit("flow_start", message=f"开始动作测试「{flow_title}」（{len(steps)} 步）")
+        try:
+            if self.s.engine.window_title:
+                activate_window(self.s.engine.window_title)
+                time.sleep(0.8)
+            for i, step in enumerate(steps, 1):
+                self._cur_idx = i
+                logger.info("动作测试[%s] 步骤 %d/%d: %s",
+                            flow_title, i, len(steps), step.label())
+                self._emit("step", phase="start", label=step.label())
+                self._run_step(step, ctx or {})
+                self._emit("step", phase="ok", label=step.label())
+            self._emit("flow_end", phase="ok", message=f"✔ 动作测试完成：{flow_title}")
+        except Exception as exc:
+            self._emit("flow_end", phase="fail", message=f"✘ 动作测试失败：{exc}")
+            raise
+        finally:
+            self._cur_flow, self._cur_idx, self._cur_total = prev
+            self._execution_lock.release()
 
     # ------------------------------------------------------------------
     # 工作线程
@@ -173,7 +211,8 @@ class Engine:
                 continue
             self._busy = True
             try:
-                result = self._execute(task)
+                with self._execution_lock:
+                    result = self._execute(task)
             finally:
                 self._busy = False
             self._dispatch_result(task, result)

@@ -25,7 +25,7 @@ from ..qt_compat import (
 
 from .. import locators
 from ..engine import Task
-from ..flows import LOCATOR_ACTIONS
+from ..flows import ACTION_LABELS, LOCATOR_ACTIONS
 from ..locators import TemplateLocator, TextLocator
 from ..logger import LOG_FILE, tail_log
 from ..settings import SNAPSHOTS_DIR
@@ -178,7 +178,7 @@ class ConfigWindow(QMainWindow):
         self.tabs.currentChanged.connect(self._on_tab_changed)
         self._load_basic()
         self._load_db()
-        self._wire_live()      # 订阅引擎事件总线 + 挂实时日志 handler + 空闲底图心跳
+        self._wire_live()      # 订阅引擎事件总线 + 日志 handler + 状态心跳
 
     # 托盘应用：关窗仅隐藏
     def closeEvent(self, event):
@@ -204,7 +204,11 @@ class ConfigWindow(QMainWindow):
         self.sb_timeout = QDoubleSpinBox(); self.sb_timeout.setRange(1.0, 120.0); self.sb_timeout.setSuffix(" s")
         self.sb_monitor = QSpinBox(); self.sb_monitor.setRange(1, 8)
         self.le_window_title = QLineEdit()
-        self.le_window_title.setPlaceholderText("浏览器窗口标题包含串；留空则不做窗口激活")
+        self.le_window_title.setPlaceholderText("例如：出货管理；任务前激活并最大化标题包含该文字的窗口")
+        self.le_window_title.setToolTip(
+            "每次执行任务前，查找标题中包含这段文字的 Windows 窗口，并将其激活、最大化。\n"
+            "建议填写网页标题中稳定且唯一的一小段，不要填写经常变化的完整标题。\n"
+            "留空则不切换窗口；程序运行在 WSL/Linux 时无法使用 Win32 窗口标题激活。")
 
         form.addRow(self.chk_run)
         form.addRow(self.chk_auto_login)
@@ -424,18 +428,23 @@ class ConfigWindow(QMainWindow):
         w = QWidget()
         outer = QVBoxLayout(w)
 
-        # 顶部：引擎状态 + 手动测试定位工具（吸收原「定位诊断」）
+        # 顶部：引擎状态 + 真实动作测试 + 模板重截
         top = QHBoxLayout()
         self.lbl_engine_state = QLabel("○ —")
         top.addWidget(self.lbl_engine_state)
+        self.btn_refresh_preview = QPushButton("刷新目标画面")
+        self.btn_refresh_preview.setToolTip(
+            "短暂隐藏本配置窗口后截取目标显示器，避免把程序自己拍进实况。")
+        self.btn_refresh_preview.clicked.connect(self._refresh_target_preview)
+        top.addWidget(self.btn_refresh_preview)
         top.addStretch()
         top.addWidget(QLabel("手动步骤:"))
         self.cmb_locator = QComboBox()
         self.cmb_locator.setMinimumWidth(300)
         self._reload_step_choices()
         top.addWidget(self.cmb_locator)
-        self.btn_test_one = QPushButton("测试选中")
-        self.btn_test_all = QPushButton("测试全部")
+        self.btn_test_one = QPushButton("执行选中动作")
+        self.btn_test_all = QPushButton("执行当前流程")
         self.btn_recap = QPushButton("重新截取模板")
         self.btn_test_one.clicked.connect(self._test_selected)
         self.btn_test_all.clicked.connect(self._test_all)
@@ -452,7 +461,9 @@ class ConfigWindow(QMainWindow):
         # 左=实时标注截图，右=实时日志 + 定位报告
         splitter = QSplitter()
         self.preview = QLabel(
-            "（运行时此处实时显示引擎看到的标注截图：\n黄=候选 橙=约束后 绿=选中 红点=点击点）")
+            "任务执行时，此处会显示引擎真正看到的标注画面。\n"
+            "空闲时请点击「刷新目标画面」，程序会先隐藏自己再截图。\n\n"
+            "标注：黄=候选 橙=约束后 绿=选中 红点=点击点")
         self.preview.setMinimumSize(520, 340)
         self.preview.setAlignment(Qt.AlignCenter)
         splitter.addWidget(self.preview)
@@ -485,7 +496,7 @@ class ConfigWindow(QMainWindow):
         outer.addLayout(bottom)
         return w
 
-    # ---- 实时接线：事件总线 + 日志 handler + 空闲底图心跳 ----
+    # ---- 实时接线：事件总线 + 日志 handler + 状态心跳 ----
 
     def _wire_live(self) -> None:
         self._bridge = _LiveBridge()
@@ -503,10 +514,10 @@ class ConfigWindow(QMainWindow):
         self.live_log.setPlainText(tail_log(200))     # 预填最近历史
         self._scroll_log_bottom()
         self._update_engine_state()
-        # 空闲时每 1.5s 纯截屏刷新底图（不跑 OCR），仅本标签可见时
+        # 只刷新队列/引擎状态，不再定时截屏，避免把配置 GUI 拍进实况。
         self._live_timer = QTimer(self)
-        self._live_timer.setInterval(1500)
-        self._live_timer.timeout.connect(self._idle_refresh)
+        self._live_timer.setInterval(1000)
+        self._live_timer.timeout.connect(self._live_heartbeat)
         self._live_timer.start()
 
     def _on_run_event(self, ev) -> None:
@@ -522,7 +533,7 @@ class ConfigWindow(QMainWindow):
         elif ev.kind == "step":
             tag = {"start": "", "searching": "· 搜索中…", "found": "· ✔ 命中",
                    "acting": "· 点击 / 输入中…", "timeout": "· ✘ 超时",
-                   "skip": "· 跳过（可选）"}.get(ev.phase, "")
+                   "skip": "· 跳过（可选）", "ok": "· ✔ 已执行"}.get(ev.phase, "")
             self.lbl_step.setText(
                 f"步骤 {ev.step_index}/{ev.step_total} 「{ev.step_label}」 {tag}")
         res = ev.result
@@ -556,21 +567,12 @@ class ConfigWindow(QMainWindow):
             st["state"], st["state"])
         self.lbl_engine_state.setText(
             f"{label}   队列 {st['queue_size']}   连败 {st['consecutive_failures']}")
+        self.btn_refresh_preview.setEnabled(st["state"] != "busy")
 
-    def _idle_refresh(self) -> None:
-        """空闲且本标签可见时，纯截屏刷新底图（不跑 OCR，几乎零成本）。"""
-        if not self.isVisible() or self.tabs.currentWidget() is not self.live_tab:
-            return
-        if self._diag_task.busy:
-            return
-        if self.engine.status()["state"] != "idle":
-            return
-        try:
-            shot = self.vision.capture()
-        except Exception:
-            return
-        self._show_pixmap(shot.img)
-        self._update_engine_state()
+    def _live_heartbeat(self) -> None:
+        """只刷新运行状态；画面由引擎事件或用户手动刷新。"""
+        if self.isVisible() and self.tabs.currentWidget() is self.live_tab:
+            self._update_engine_state()
 
     def _show_pixmap(self, img_bgr) -> None:
         # 全黑帧检测：mss 在 WSL/WSLg（X11 抓屏拿到黑帧）或 macOS 未授权「屏幕录制」
@@ -614,15 +616,15 @@ class ConfigWindow(QMainWindow):
         return "T2模板" if isinstance(loc, TemplateLocator) else "T1文字"
 
     def _reload_step_choices(self) -> None:
-        """按 流程 › 步骤 重建手动下拉，尽量保留当前选中项。"""
+        """按 流程 › 步骤 重建手动执行下拉，尽量保留当前选中项。"""
         prev = self.cmb_locator.currentData()
         self.cmb_locator.blockSignals(True)
         self.cmb_locator.clear()
         for flow in self.engine.flows.flows.values():
             for step in flow.steps:
-                if not self._step_has_target(step):
-                    continue
-                text = f"{flow.title} › {step.label()}  [{self._step_kind(step)}]"
+                kind = (self._step_kind(step) if self._step_has_target(step)
+                        else ACTION_LABELS.get(step.action, step.action))
+                text = f"{flow.title} › {step.label()}  [{kind}]"
                 self.cmb_locator.addItem(text, (flow.key, step.id))
         if prev is not None:
             idx = self.cmb_locator.findData(prev)
@@ -655,75 +657,107 @@ class ConfigWindow(QMainWindow):
         finally:
             self.show()
 
-    def _test_selected(self) -> None:
-        flow, step = self._resolve_step(self.cmb_locator.currentData())
-        if step is None:
-            QMessageBox.information(self, "提示", "请先选择一个步骤")
-            return
-        self._run_test([step])
-
-    def _test_all(self) -> None:
-        steps = [s for flow in self.engine.flows.flows.values()
-                 for s in flow.steps if self._step_has_target(s)]
-        if not steps:
-            QMessageBox.information(self, "提示", "当前没有可定位的步骤")
-            return
-        self._run_test(steps)
-
-    def _run_test(self, steps: list) -> None:
+    def _refresh_target_preview(self) -> None:
+        """空闲时手动刷新目标底图，且不把配置 GUI 拍进去。"""
         if self._diag_task.busy:
-            QMessageBox.information(self, "正在处理", "上一个定位测试尚未完成，请稍候。")
+            QMessageBox.information(self, "正在处理", "定位测试尚未完成，请稍候再刷新。")
+            return
+        if self.engine.status()["state"] == "busy":
+            QMessageBox.information(
+                self, "引擎运行中",
+                "任务执行时画面会由引擎自动更新，请勿另外截屏干扰当前步骤。")
             return
         try:
             shot = self._capture_hidden()
         except Exception as e:
             QMessageBox.warning(self, "截屏失败", str(e))
             return
+        self._show_pixmap(shot.img)
+        self.lbl_step.setText("目标画面已刷新（未运行定位）")
+        self._update_engine_state()
 
-        jobs = []
-        config_reports = []
-        for step in steps:
-            label = step.label()
-            try:
-                loc = step.build_locator()
-            except Exception as e:
-                config_reports.append(f"[{label}] ✘ 定位配置无效: {e}")
-                continue
-            if loc is None:
-                continue
-            jobs.append((label, loc))
+    def _test_selected(self) -> None:
+        flow, step = self._resolve_step(self.cmb_locator.currentData())
+        if flow is None or step is None:
+            QMessageBox.information(self, "提示", "请先选择一个步骤")
+            return
+        self._run_test(f"{flow.title} › {step.label()}", [step])
+
+    def _test_all(self) -> None:
+        flow, _ = self._resolve_step(self.cmb_locator.currentData())
+        if flow is None:
+            QMessageBox.information(self, "提示", "请先选择当前流程中的一个步骤")
+            return
+        if not flow.steps:
+            QMessageBox.information(self, "提示", f"流程「{flow.title}」没有步骤")
+            return
+        self._run_test(flow.title, list(flow.steps))
+
+    def _request_test_context(self, steps: list) -> dict | None:
+        """为真实动作测试收集流程变量；取消时返回 None。"""
+        ctx = {}
+        if any(s.action == "input" and s.value_source == "vehicle_no" for s in steps):
+            text, ok = QInputDialog.getText(self, "动作测试", "测试用车辆自编号：")
+            if not ok:
+                return None
+            if not text.strip():
+                QMessageBox.warning(self, "无法执行", "车辆自编号不能为空")
+                return None
+            ctx["vehicle_no"] = text.strip()
+        return ctx
+
+    def _run_test(self, title: str, steps: list) -> None:
+        if self._diag_task.busy:
+            QMessageBox.information(self, "正在处理", "上一个动作测试尚未完成，请稍候。")
+            return
+        if self.engine.status()["state"] == "busy":
+            QMessageBox.information(self, "引擎忙碌", "正式任务正在执行，请完成后再测试动作。")
+            return
+        ctx = self._request_test_context(steps)
+        if ctx is None:
+            return
 
         self.live_tab.setEnabled(False)
-        self.lbl_step.setText("· 正在初始化 OCR 并测试定位…（窗口不会卡住）")
-        logger.info("开始后台定位测试（%d 个步骤）", len(jobs))
+        self.lbl_step.setText(f"· 正在真实执行「{title}」…")
+        logger.info("开始 UI 动作测试：%s（%d 步）", title, len(steps))
+        self.hide()
+        QGuiApplication.processEvents()
+        time.sleep(0.5)
 
         def _work():
-            annotated = shot.img.copy()
-            reports = list(config_reports)
-            for label, loc in jobs:
-                try:
-                    res = self.vision.locate(loc, shot)
-                except Exception as e:
-                    reports.append(f"[{label}] ✘ 异常: {e}")
-                    continue
-                draw_result(annotated, res)
-                reports.append(f"[{label}]\n{res.describe()}")
-            return annotated, reports
+            self.engine.execute_steps_sync(title, steps, ctx)
+            time.sleep(0.2)
+            try:
+                return self.vision.capture(), None
+            except Exception as exc:
+                return None, str(exc)
 
         def _finished(result, error):
+            self.show()
+            self.raise_()
+            self.activateWindow()
             self.live_tab.setEnabled(True)
             if error is not None:
-                self.lbl_step.setText(f"定位测试失败：{error}")
-                QMessageBox.warning(self, "测试失败", str(error))
+                shot = getattr(error, "shot", None)
+                if shot is not None:
+                    self._show_pixmap(shot.img)
+                self.diag_text.setPlainText(f"✘ 动作执行失败\n{error}")
+                self.lbl_step.setText(f"动作测试失败：{error}")
+                QMessageBox.warning(self, "动作测试失败", str(error))
                 return
-            annotated, reports = result
-            pix = np_to_pixmap(annotated)
-            self.preview.setPixmap(pix.scaled(
-                self.preview.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
-            self.diag_text.setPlainText("\n\n".join(reports) or "（无可定位步骤）")
-            self.lbl_step.setText("定位测试完成")
+            final_shot, capture_error = result
+            if final_shot is not None:
+                self._show_pixmap(final_shot.img)
+            report = "\n".join(f"✔ {i}. {s.label()}" for i, s in enumerate(steps, 1))
+            suffix = f"\n\n执行后截屏失败：{capture_error}" if capture_error else ""
+            self.diag_text.setPlainText(f"已真实执行：\n{report}{suffix}")
+            self.lbl_step.setText(f"✔ 动作测试完成：{title}")
 
-        self._diag_task.start("定位测试", _work, _finished)
+        if not self._diag_task.start("动作测试", _work, _finished):
+            self.show()
+            self.raise_()
+            self.activateWindow()
+            self.live_tab.setEnabled(True)
 
     def _recapture_template(self) -> None:
         flow, step = self._resolve_step(self.cmb_locator.currentData())
