@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 import re
 import threading
 import time
+from hashlib import blake2b
 from dataclasses import dataclass, field
 
 from typing import Callable
@@ -68,6 +70,8 @@ class Screenshot:
     top: int = 0
     ts: float = 0.0
     ocr: list[Candidate] | None = None  # OCR 结果缓存（同一张截图只跑一次 OCR）
+    ocr_regions: dict[tuple[int, int, int, int], list[Candidate]] = field(
+        default_factory=dict)            # ROI OCR 缓存（候选框已转回全屏坐标）
 
 
 @dataclass
@@ -137,7 +141,28 @@ class Vision:
         self.settings = settings
         self._ocr_engine = None
         self._ocr_lock = threading.Lock()
+        self._last_ocr_key: tuple | None = None
+        self._last_ocr_result: list[Candidate] | None = None
+        self._warmup_thread: threading.Thread | None = None
         self._tmpl_cache: dict[str, tuple[float, np.ndarray]] = {}
+
+    def warm_up_async(self) -> None:
+        """后台预热 OCR，避免第一个业务任务才支付模型初始化成本。"""
+        if self._warmup_thread is not None and self._warmup_thread.is_alive():
+            return
+
+        def run() -> None:
+            try:
+                blank = np.full((64, 256, 3), 255, dtype=np.uint8)
+                self._run_ocr(blank)
+                logger.info("RapidOCR 后台预热完成")
+            except Exception:
+                # 预热失败不应阻止程序启动；真正识别时仍会返回明确错误。
+                logger.warning("RapidOCR 后台预热失败", exc_info=True)
+
+        self._warmup_thread = threading.Thread(
+            target=run, name="ocr-warmup", daemon=True)
+        self._warmup_thread.start()
 
     # ------------------------------------------------------------------
     # 截屏
@@ -172,12 +197,45 @@ class Vision:
                 except ImportError:
                     raise VisionError(
                         "RapidOCR 未安装（pip install rapidocr-onnxruntime）")
-            logger.info("初始化 RapidOCR ...")
-            self._ocr_engine = RapidOCR()
+            cfg = self.settings.engine
+            cpu_count = os.cpu_count() or 1
+            threads = int(getattr(cfg, "ocr_threads", 0) or 0)
+            if threads <= 0:
+                threads = min(cpu_count, 4)
+            use_cls = bool(getattr(cfg, "ocr_use_angle_cls", False))
+            kwargs = {
+                "use_cls": use_cls,
+                "intra_op_num_threads": max(1, threads),
+                "inter_op_num_threads": 1,
+            }
+            logger.info("RapidOCR 初始化（CPU 线程=%d，方向分类=%s）...",
+                        threads, "开" if use_cls else "关")
+            t0 = time.time()
+            try:
+                self._ocr_engine = RapidOCR(**kwargs)
+            except (TypeError, ValueError, KeyError):
+                # 兼容不接受这些参数的新/旧 RapidOCR 变体。
+                logger.warning("RapidOCR 当前版本不支持性能参数，回退默认初始化",
+                               exc_info=True)
+                self._ocr_engine = RapidOCR()
+            logger.info("RapidOCR 初始化完成，耗时 %.2fs", time.time() - t0)
         return self._ocr_engine
 
-    def _run_ocr(self, img: np.ndarray) -> list[Candidate]:
+    @staticmethod
+    def _image_key(img: np.ndarray) -> tuple:
+        """给画面生成安全的精确指纹；只有像素完全相同才会复用 OCR。"""
+        if not img.flags.c_contiguous:
+            img = np.ascontiguousarray(img)
+        digest = blake2b(memoryview(img), digest_size=16).digest()
+        return img.shape, img.dtype.str, digest
+
+    def _run_ocr(self, img: np.ndarray, *, reuse_identical: bool = False) -> list[Candidate]:
+        key = self._image_key(img) if reuse_identical else None
         with self._ocr_lock:
+            if (key is not None and key == self._last_ocr_key
+                    and self._last_ocr_result is not None):
+                logger.debug("OCR 复用相同画面结果（%d 行）", len(self._last_ocr_result))
+                return self._last_ocr_result
             out = self._get_ocr()(img)
         items: list[tuple] = []
         if isinstance(out, tuple):                     # rapidocr_onnxruntime: (result, elapse)
@@ -192,14 +250,40 @@ class Vision:
             cands.append(Candidate(
                 box=(int(min(xs)), int(min(ys)), int(max(xs)), int(max(ys))),
                 score=float(score), text=str(text)))
+        if key is not None:
+            self._last_ocr_key = key
+            self._last_ocr_result = cands
         return cands
 
-    def ocr_lines(self, shot: Screenshot) -> list[Candidate]:
-        if shot.ocr is None:
-            t0 = time.time()
-            shot.ocr = self._run_ocr(shot.img)
-            logger.debug("OCR %d 行，耗时 %.2fs", len(shot.ocr), time.time() - t0)
-        return shot.ocr
+    def ocr_lines(self, shot: Screenshot,
+                  roi: tuple[float, float, float, float] | None = None) -> list[Candidate]:
+        """读取全屏或 ROI 文字；ROI 候选框仍使用全屏坐标。"""
+        if roi is None or shot.ocr is not None:
+            if shot.ocr is None:
+                t0 = time.time()
+                shot.ocr = self._run_ocr(shot.img, reuse_identical=True)
+                logger.debug("OCR 全屏 %d 行，耗时 %.2fs", len(shot.ocr), time.time() - t0)
+            return shot.ocr
+
+        H, W = shot.img.shape[:2]
+        l, t, r, b = roi
+        px = (max(0, int(l * W)), max(0, int(t * H)),
+              min(W, int(r * W)), min(H, int(b * H)))
+        if px in shot.ocr_regions:
+            return shot.ocr_regions[px]
+        x1, y1, x2, y2 = px
+        if x2 - x1 < 4 or y2 - y1 < 4:
+            shot.ocr_regions[px] = []
+            return []
+        t0 = time.time()
+        local = self._run_ocr(shot.img[y1:y2, x1:x2], reuse_identical=True)
+        translated = [Candidate(
+            box=(c.box[0] + x1, c.box[1] + y1,
+                 c.box[2] + x1, c.box[3] + y1),
+            score=c.score, text=c.text) for c in local]
+        shot.ocr_regions[px] = translated
+        logger.debug("OCR 局部 %s %d 行，耗时 %.2fs", px, len(translated), time.time() - t0)
+        return translated
 
     def ocr_image(self, img: np.ndarray) -> list[Candidate]:
         """对任意图片跑 OCR（验证码识别等独立小图场景）。"""
@@ -213,7 +297,7 @@ class Vision:
         if r - l < 4 or b - t < 4:
             return ""
         crop = shot.img[t:b, l:r]
-        return " ".join(c.text or "" for c in self._run_ocr(crop))
+        return " ".join(c.text or "" for c in self._run_ocr(crop, reuse_identical=True))
 
     # ------------------------------------------------------------------
     # 定位（T1 消歧漏斗 / T2 模板）
@@ -229,7 +313,7 @@ class Vision:
     def _locate_text(self, loc: TextLocator, shot: Screenshot) -> LocateResult:
         res = LocateResult(locator=loc, shot=shot)
         try:
-            lines = self.ocr_lines(shot)
+            lines = self.ocr_lines(shot, loc.roi)
         except VisionError as e:
             res.reason = str(e)
             return self._try_fallback(loc, shot, res)
@@ -430,7 +514,7 @@ class Vision:
             if isinstance(locator, TextLocator):
                 anchor = _norm(locator.anchor)
                 cands = []
-                for c in self.ocr_lines(shot):
+                for c in self.ocr_lines(shot, locator.roi):
                     t = _norm(c.text or "")
                     hit = (t == anchor) if locator.match == Match.EXACT else (anchor in t)
                     if hit:

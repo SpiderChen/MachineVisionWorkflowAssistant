@@ -30,6 +30,7 @@ from ..locators import TemplateLocator, TextLocator
 from ..logger import LOG_FILE, tail_log
 from ..settings import SNAPSHOTS_DIR
 from ..vision import draw_result
+from .background import BackgroundTask
 from .flow_tab import FlowTab
 
 logger = logging.getLogger(__name__)
@@ -160,6 +161,7 @@ class ConfigWindow(QMainWindow):
         self.vision = vision
         self.engine = engine
         self._overlay = None
+        self._diag_task = BackgroundTask(self)
         self.setWindowTitle("出货单自动打印助手 — 配置")
         self.resize(1000, 700)
 
@@ -432,13 +434,13 @@ class ConfigWindow(QMainWindow):
         self.cmb_locator.setMinimumWidth(300)
         self._reload_step_choices()
         top.addWidget(self.cmb_locator)
-        btn_one = QPushButton("测试选中")
-        btn_all = QPushButton("测试全部")
-        btn_recap = QPushButton("重新截取模板")
-        btn_one.clicked.connect(self._test_selected)
-        btn_all.clicked.connect(self._test_all)
-        btn_recap.clicked.connect(self._recapture_template)
-        for b in (btn_one, btn_all, btn_recap):
+        self.btn_test_one = QPushButton("测试选中")
+        self.btn_test_all = QPushButton("测试全部")
+        self.btn_recap = QPushButton("重新截取模板")
+        self.btn_test_one.clicked.connect(self._test_selected)
+        self.btn_test_all.clicked.connect(self._test_all)
+        self.btn_recap.clicked.connect(self._recapture_template)
+        for b in (self.btn_test_one, self.btn_test_all, self.btn_recap):
             top.addWidget(b)
         outer.addLayout(top)
 
@@ -559,6 +561,8 @@ class ConfigWindow(QMainWindow):
         """空闲且本标签可见时，纯截屏刷新底图（不跑 OCR，几乎零成本）。"""
         if not self.isVisible() or self.tabs.currentWidget() is not self.live_tab:
             return
+        if self._diag_task.busy:
+            return
         if self.engine.status()["state"] != "idle":
             return
         try:
@@ -667,33 +671,59 @@ class ConfigWindow(QMainWindow):
         self._run_test(steps)
 
     def _run_test(self, steps: list) -> None:
+        if self._diag_task.busy:
+            QMessageBox.information(self, "正在处理", "上一个定位测试尚未完成，请稍候。")
+            return
         try:
             shot = self._capture_hidden()
         except Exception as e:
             QMessageBox.warning(self, "截屏失败", str(e))
             return
-        annotated = shot.img.copy()
-        reports = []
+
+        jobs = []
+        config_reports = []
         for step in steps:
             label = step.label()
             try:
                 loc = step.build_locator()
             except Exception as e:
-                reports.append(f"[{label}] ✘ 定位配置无效: {e}")
+                config_reports.append(f"[{label}] ✘ 定位配置无效: {e}")
                 continue
             if loc is None:
                 continue
-            try:
-                res = self.vision.locate(loc, shot)
-            except Exception as e:
-                reports.append(f"[{label}] ✘ 异常: {e}")
-                continue
-            draw_result(annotated, res)
-            reports.append(f"[{label}]\n{res.describe()}")
-        pix = np_to_pixmap(annotated)
-        self.preview.setPixmap(pix.scaled(
-            self.preview.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
-        self.diag_text.setPlainText("\n\n".join(reports) or "（无可定位步骤）")
+            jobs.append((label, loc))
+
+        self.live_tab.setEnabled(False)
+        self.lbl_step.setText("· 正在初始化 OCR 并测试定位…（窗口不会卡住）")
+        logger.info("开始后台定位测试（%d 个步骤）", len(jobs))
+
+        def _work():
+            annotated = shot.img.copy()
+            reports = list(config_reports)
+            for label, loc in jobs:
+                try:
+                    res = self.vision.locate(loc, shot)
+                except Exception as e:
+                    reports.append(f"[{label}] ✘ 异常: {e}")
+                    continue
+                draw_result(annotated, res)
+                reports.append(f"[{label}]\n{res.describe()}")
+            return annotated, reports
+
+        def _finished(result, error):
+            self.live_tab.setEnabled(True)
+            if error is not None:
+                self.lbl_step.setText(f"定位测试失败：{error}")
+                QMessageBox.warning(self, "测试失败", str(error))
+                return
+            annotated, reports = result
+            pix = np_to_pixmap(annotated)
+            self.preview.setPixmap(pix.scaled(
+                self.preview.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            self.diag_text.setPlainText("\n\n".join(reports) or "（无可定位步骤）")
+            self.lbl_step.setText("定位测试完成")
+
+        self._diag_task.start("定位测试", _work, _finished)
 
     def _recapture_template(self) -> None:
         flow, step = self._resolve_step(self.cmb_locator.currentData())

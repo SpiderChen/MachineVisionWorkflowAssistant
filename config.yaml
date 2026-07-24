@@ -12,6 +12,8 @@ engine:
   verify_success: false      # 流程⑥：打印成功特征校验（页面无可靠反馈保持 false）
   monitor: 1                 # 目标显示器编号（mss，1=主屏）
   window_title: ""           # 浏览器窗口标题包含串；非空则执行前激活并最大化该窗口
+  ocr_threads: 0             # 0=自动（最多 4 线程），适合老款四核 CPU
+  ocr_use_angle_cls: false   # 桌面 UI 文字为水平方向，关闭方向分类以提速
 db:
   enabled: false
   url: "mssql+pyodbc://user:pass@host/db?driver=ODBC+Driver+17+for+SQL+Server"

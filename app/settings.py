@@ -52,6 +52,8 @@ class EngineCfg:
     verify_success: bool = False         # 流程⑥：打印成功特征校验（页面无可靠反馈保持 false）
     monitor: int = 1                     # 目标显示器编号（mss，1=主屏）
     window_title: str = ""               # 浏览器窗口标题包含串；非空则执行前激活并最大化
+    ocr_threads: int = 0                 # 0=自动（最多 4 线程），避免旧 CPU 过度抢占
+    ocr_use_angle_cls: bool = False      # 桌面 UI 文字水平排列，关闭方向分类可明显提速
 
 
 @dataclass

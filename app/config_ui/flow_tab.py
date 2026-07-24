@@ -29,6 +29,7 @@ from ..flows import (
 )
 from ..settings import TEMPLATES_DIR
 from ..vision import Screenshot, draw_result
+from .background import BackgroundTask
 
 logger = logging.getLogger(__name__)
 
@@ -190,6 +191,7 @@ class FlowTab(QWidget):
         self._pending_captcha = False            # 等待框选验证码图片区域
         self._reports: dict[str, str] = {}       # step.id → 最近一次推导说明
         self._loading = False
+        self._task = BackgroundTask(self)
         self._build_ui()
         self._reload_flows()
 
@@ -320,9 +322,9 @@ class FlowTab(QWidget):
         self.txt_report.setMaximumHeight(96)
         self.txt_report.setPlaceholderText("框选后此处显示系统自动推导的定位方式与自检结果")
         form.addRow(self.txt_report)
-        btn_test = QPushButton("🎯 测试此步定位（当前屏幕）")
-        btn_test.clicked.connect(self._test_step)
-        form.addRow(btn_test)
+        self.btn_test = QPushButton("🎯 测试此步定位（当前屏幕）")
+        self.btn_test.clicked.connect(self._test_step)
+        form.addRow(self.btn_test)
         rv.addWidget(box)
 
         splitter.addWidget(left)
@@ -536,56 +538,69 @@ class FlowTab(QWidget):
         self._annotate(s, tuple(s.box), (x, y))
 
     def _annotate(self, step: Step, box, click) -> None:
-        try:
-            sl, report = derive_locator(self.vision, self._shot, box, click, step.id)
-        except Exception as e:
-            logger.exception("标注推导失败")
-            QMessageBox.warning(self, "标注失败", str(e))
-            return
-        step.locator = sl
-        step.ref = ""
-        step.box = list(box)
-        step.click = list(click)
+        shot = self._shot
         shot_name = f"{step.id}.png"
-        cv2.imwrite(str(SHOTS_DIR / shot_name), self._shot.img)
-        step.shot = shot_name
-        self._reports[step.id] = "\n".join(report)
 
-        row = self.flow.steps.index(step)
-        self._refresh_steps(keep_row=row)          # 触发 _on_step_selected 刷新面板
-        self.lbl_hint.setText("已生成定位（见下方说明）。可继续拖框修正或右键微调点击点")
+        def _work():
+            sl, report = derive_locator(self.vision, shot, box, click, step.id)
+            if not cv2.imwrite(str(SHOTS_DIR / shot_name), shot.img):
+                raise FlowError(f"无法保存标注截图: {SHOTS_DIR / shot_name}")
+            return sl, report
+
+        def _done(result):
+            sl, report = result
+            step.locator = sl
+            step.ref = ""
+            step.box = list(box)
+            step.click = list(click)
+            step.shot = shot_name
+            self._reports[step.id] = "\n".join(report)
+            if self.flow is None or step not in self.flow.steps:
+                return
+            row = self.flow.steps.index(step)
+            self._refresh_steps(keep_row=row)      # 触发 _on_step_selected 刷新面板
+            self.lbl_hint.setText(
+                "已生成定位（见下方说明）。可继续拖框修正或右键微调点击点")
+
+        self._run_vision_task("正在初始化 OCR 并生成定位…", _work, _done, "标注失败")
 
     def _annotate_captcha(self, box) -> None:
         """验证码图片区域：换算为相对目标命中框的比例存储，并当场试识别一次。"""
         from ..captcha import solve_arith
 
         s = self.step
-        try:
+        shot = self._shot
+
+        def _work():
             loc = s.build_locator()
-            res = self.vision.locate(loc, self._shot) if loc is not None else None
-        except Exception as e:
-            QMessageBox.warning(self, "无法标注验证码区域", str(e))
-            return
-        if res is None or not res.ok or res.chosen is None:
-            QMessageBox.warning(
-                self, "无法标注验证码区域",
-                "目标输入框在当前截图上未定位成功，请先框选/修正目标输入框")
-            return
-        c = res.chosen
-        l, t, r, b = box
-        s.captcha_box = [int(v) for v in box]
-        s.captcha_ratio = [round((l - c.cx) / max(c.w, 1), 3),
-                           round((t - c.cy) / max(c.h, 1), 3),
-                           round((r - c.cx) / max(c.w, 1), 3),
-                           round((b - c.cy) / max(c.h, 1), 3)]
-        self.canvas.set_annotation(s.box, s.click, s.captcha_box)
-        got = solve_arith(self.vision, self._shot.img[t:b, l:r])
-        extra = (f"试识别：{got[1]} = {got[0]} ✔" if got
-                 else "⚠ 试识别失败：当前图上未解析出算术题（真实页面上再测）")
-        report = (self._reports.get(s.id) or self._locator_summary(s)).rstrip()
-        self._reports[s.id] = f"{report}\n验证码图片区域已记录（相对目标框比例）\n{extra}"
-        self.txt_report.setPlainText(self._reports[s.id])
-        self.lbl_hint.setText("验证码区域已记录（蓝框）。可重新框选覆盖")
+            res = self.vision.locate(loc, shot) if loc is not None else None
+            if res is None or not res.ok or res.chosen is None:
+                raise FlowError(
+                    "目标输入框在当前截图上未定位成功，请先框选/修正目标输入框")
+            c = res.chosen
+            l, t, r, b = box
+            ratio = [round((l - c.cx) / max(c.w, 1), 3),
+                     round((t - c.cy) / max(c.h, 1), 3),
+                     round((r - c.cx) / max(c.w, 1), 3),
+                     round((b - c.cy) / max(c.h, 1), 3)]
+            got = solve_arith(self.vision, shot.img[t:b, l:r])
+            return ratio, got
+
+        def _done(result):
+            ratio, got = result
+            s.captcha_box = [int(v) for v in box]
+            s.captcha_ratio = ratio
+            self.canvas.set_annotation(s.box, s.click, s.captcha_box)
+            extra = (f"试识别：{got[1]} = {got[0]} ✔" if got
+                     else "⚠ 试识别失败：当前图上未解析出算术题（真实页面上再测）")
+            report = (self._reports.get(s.id) or self._locator_summary(s)).rstrip()
+            self._reports[s.id] = (
+                f"{report}\n验证码图片区域已记录（相对目标框比例）\n{extra}")
+            self.txt_report.setPlainText(self._reports[s.id])
+            self.lbl_hint.setText("验证码区域已记录（蓝框）。可重新框选覆盖")
+
+        self._run_vision_task(
+            "正在定位输入框并识别验证码…", _work, _done, "无法标注验证码区域")
 
     # ------------------------------------------------------------------
     # 步骤属性 / 增删移
@@ -700,6 +715,25 @@ class FlowTab(QWidget):
             return
         QMessageBox.information(self, "已保存", "流程已保存并即刻生效（无需重启）")
 
+    def _run_vision_task(self, status: str, fn, on_done, error_title: str) -> None:
+        """Run slow OCR/locating work without blocking the Qt event loop."""
+        if self._task.busy:
+            QMessageBox.information(self, "正在处理", "上一个 OCR/定位任务尚未完成，请稍候。")
+            return
+        self.setEnabled(False)
+        self.lbl_hint.setText(status + "（窗口不会卡住）")
+        logger.info(status.rstrip("…"))
+
+        def _finished(result, error):
+            self.setEnabled(True)
+            if error is not None:
+                QMessageBox.warning(self, error_title, str(error))
+                self.lbl_hint.setText(f"{error_title}：{error}")
+                return
+            on_done(result)
+
+        self._task.start(status.rstrip("…"), fn, _finished)
+
     def _test_step(self) -> None:
         if self.step is None:
             QMessageBox.information(self, "提示", "请先选择一个步骤")
@@ -717,15 +751,23 @@ class FlowTab(QWidget):
             return
         try:
             shot = self._capture_hidden()
+        except Exception as e:
+            QMessageBox.warning(self, "截屏失败", str(e))
+            return
+
+        def _work():
             t0 = time.time()
             res = self.vision.locate(loc, shot)
-            elapsed = time.time() - t0
-        except Exception as e:
-            QMessageBox.warning(self, "测试失败", str(e))
-            return
-        annotated = shot.img.copy()
-        draw_result(annotated, res)
-        self._canvas_preview = True
-        self.canvas.set_image(annotated)
-        self.lbl_hint.setText("正在显示定位测试结果；重新选择步骤或重新截屏可返回标注")
-        self.txt_report.setPlainText(f"{res.describe()}\n（耗时 {elapsed:.2f}s）")
+            annotated = shot.img.copy()
+            draw_result(annotated, res)
+            return res, annotated, time.time() - t0
+
+        def _done(result):
+            res, annotated, elapsed = result
+            self._canvas_preview = True
+            self.canvas.set_image(annotated)
+            self.lbl_hint.setText(
+                "正在显示定位测试结果；重新选择步骤或重新截屏可返回标注")
+            self.txt_report.setPlainText(f"{res.describe()}\n（耗时 {elapsed:.2f}s）")
+
+        self._run_vision_task("正在初始化 OCR 并测试此步定位…", _work, _done, "测试失败")

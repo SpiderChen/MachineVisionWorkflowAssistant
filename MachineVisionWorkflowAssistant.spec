@@ -51,6 +51,7 @@ hiddenimports += [
     "app.locators", "app.flows", "app.captcha", "app.monitor", "app.logger",
     "app.login_flow", "app.tray", "app.triggers.api_server", "app.triggers.db_poller",
     "app.config_ui", "app.config_ui.window", "app.config_ui.flow_tab",
+    "app.config_ui.background",
 ]
 
 block_cipher = None

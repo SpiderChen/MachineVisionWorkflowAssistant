@@ -23,6 +23,7 @@ def _build_core(settings):
 
     make_dpi_aware()
     vision = Vision(settings)
+    vision.warm_up_async()
     inputs = InputController()
     engine = Engine(settings, vision, inputs)
     return vision, inputs, engine

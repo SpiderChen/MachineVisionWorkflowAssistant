@@ -289,6 +289,10 @@ GET /health          # 存活探测
 运行参数持久化到 `config.yaml`；流程定义存 `flows.yaml`（流程编排页维护，用户不手编）；
 内置注册元素定位在代码（`app/locators.py`），模板图片存 `templates/`，标注底图存 `flows_assets/`。
 
+低配 CPU 的 OCR 默认使用最多 4 个线程，并关闭桌面水平文字不需要的方向分类；
+可通过 `engine.ocr_threads` 和 `engine.ocr_use_angle_cls` 调整。引擎还会精确复用像素未变的
+截图 OCR 结果，带 ROI 的流程步骤只识别局部区域，不放宽原有的安全消歧规则。
+
 ## 7. 目录结构（规划）
 
 ```
