@@ -4,7 +4,8 @@ from unittest.mock import patch
 
 import numpy as np
 
-from app.engine import Engine
+from app.captcha import parse_arith, solve_arith
+from app.engine import Engine, StepError
 from app.flows import (
     Step, StepLocator, derive_dynamic_arith_locator, relative_box_ratio,
 )
@@ -22,6 +23,40 @@ class _FakeVision:
 
 
 class DynamicCaptchaTests(unittest.TestCase):
+    def test_parse_arith_recovers_common_ocr_confusions(self):
+        self.assertEqual(parse_arith("B 十 S = ?"), ("13", "8+5"))
+        self.assertEqual(parse_arith("O：S"), ("0", "0/5"))
+        self.assertEqual(parse_arith("9–4"), ("5", "9-4"))
+
+    def test_solver_reorders_split_ocr_candidates_left_to_right(self):
+        class _CaptchaVision:
+            def ocr_image(self, image):
+                return [
+                    Candidate(box=(70, 0, 90, 20), text="5=?", score=0.95),
+                    Candidate(box=(10, 0, 40, 20), text="3+", score=0.96),
+                ]
+
+        img = np.full((30, 100, 3), 255, dtype=np.uint8)
+
+        self.assertEqual(solve_arith(_CaptchaVision(), img), ("8", "3+5"))
+
+    def test_solver_continues_after_one_ocr_variant_errors(self):
+        class _FlakyCaptchaVision:
+            def __init__(self):
+                self.calls = 0
+
+            def ocr_image(self, image):
+                self.calls += 1
+                if self.calls == 1:
+                    raise RuntimeError("temporary OCR failure")
+                return [Candidate(box=(0, 0, 50, 20), text="6×2=?", score=0.9)]
+
+        vision = _FlakyCaptchaVision()
+        img = np.full((30, 100, 3), 255, dtype=np.uint8)
+
+        self.assertEqual(solve_arith(vision, img), ("12", "6*2"))
+        self.assertEqual(vision.calls, 2)
+
     def test_arith_match_accepts_changed_question(self):
         loc = TextLocator(anchor="0*9=?", match=Match.ARITH)
 
@@ -189,6 +224,48 @@ class DynamicCaptchaTests(unittest.TestCase):
 
         self.assertEqual(engine.inputs.clicks, [(350, 120)])
         self.assertEqual(solve.call_count, 2)
+
+    def test_engine_refreshes_captcha_up_to_ten_times(self):
+        engine = Engine.__new__(Engine)
+        shot = Screenshot(img=np.zeros((300, 500, 3), dtype=np.uint8))
+        answer = Candidate(box=(100, 100, 300, 140), text="", score=0.99)
+        input_res = LocateResult(
+            locator=TextLocator(anchor="验证码", match=Match.EXACT), ok=True,
+            chosen=answer, click_point=(200, 120), shot=shot,
+        )
+        step = Step(
+            action="input", value_source="captcha",
+            locator=StepLocator(kind="text", anchor="验证码", match="exact"),
+            captcha_ratio=[0.6, -0.5, 0.9, 0.5],
+        )
+
+        class _Vision:
+            def capture(self):
+                return shot
+
+            def locate(self, loc, current_shot):
+                return input_res
+
+            def to_screen(self, current_shot, point):
+                return point
+
+        class _Inputs:
+            def __init__(self):
+                self.clicks = []
+
+            def click(self, x, y):
+                self.clicks.append((x, y))
+
+        engine.vision = _Vision()
+        engine.inputs = _Inputs()
+
+        with patch("app.captcha.solve_arith", return_value=None) as solve, \
+                patch("app.engine.time.sleep"):
+            with self.assertRaisesRegex(StepError, "连续刷新 10 次"):
+                engine._solve_captcha(step, input_res)
+
+        self.assertEqual(len(engine.inputs.clicks), 10)
+        self.assertEqual(solve.call_count, 11)
 
     def test_input_step_clicks_answer_field_then_types_calculated_result(self):
         engine = Engine.__new__(Engine)

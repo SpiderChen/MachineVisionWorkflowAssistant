@@ -25,7 +25,7 @@ from .vision import LocateResult, Screenshot, Vision
 
 logger = logging.getLogger(__name__)
 
-_CAPTCHA_MAX_REFRESHES = 3
+_CAPTCHA_MAX_REFRESHES = 10
 _CAPTCHA_REFRESH_DELAY = 0.8
 
 
