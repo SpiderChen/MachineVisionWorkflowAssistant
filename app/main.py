@@ -10,10 +10,30 @@ from __future__ import annotations
 
 import argparse
 import logging
+import signal
 import sys
 import threading
 
 logger = logging.getLogger(__name__)
+
+
+def _install_qt_interrupt_handler(app) -> None:
+    """让控制台 Ctrl+C 请求 Qt 正常退出，而不是打断任意一个 UI 回调。
+
+    Python 默认会在主线程下一次执行字节码时抛出 ``KeyboardInterrupt``。Qt 界面
+    恰好由定时器周期性回到 Python，因此异常经常显示在无辜的心跳槽函数上，并被
+    打包入口误报为“启动失败”。注册 SIGINT 后让事件循环自行结束，后续清理仍会执行。
+    """
+
+    def request_quit(_signum, _frame) -> None:
+        logger.info("收到 Ctrl+C，正在退出")
+        app.quit()
+
+    try:
+        signal.signal(signal.SIGINT, request_quit)
+    except (AttributeError, ValueError):
+        # 非主线程或极少数不提供 SIGINT 的平台不支持安装；保留原平台行为。
+        logger.debug("当前环境无法安装 SIGINT 处理器", exc_info=True)
 
 
 def _build_core(settings):
@@ -111,6 +131,7 @@ def _run_service(settings, vision, inputs, engine, headless: bool) -> int:
         quit_app = Signal()
 
     app = QApplication(sys.argv)
+    _install_qt_interrupt_handler(app)
     win = ConfigWindow(settings, vision, engine)
     if sys.platform == "darwin":
         # macOS 不用 pystray 菜单栏（AppKit 要求主线程、依赖 pyobjc），直接把配置窗口
@@ -168,6 +189,7 @@ def _run_config_window(settings, vision, engine) -> int:
     from .triggers.db_poller import DbPoller
 
     app = QApplication(sys.argv)
+    _install_qt_interrupt_handler(app)
     app.setQuitOnLastWindowClosed(True)      # 无托盘：关窗即退出
     # WSL 无内置中文字体时借用 Windows 微软雅黑，避免界面中文显示为方框
     win_font = "/mnt/c/Windows/Fonts/msyh.ttc"

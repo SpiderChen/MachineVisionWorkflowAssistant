@@ -17,6 +17,11 @@ def _base_dir() -> str:
 def _report_crash(exc_type, exc, tb) -> None:
     import traceback
 
+    # Ctrl+C 是用户主动停止，不是启动崩溃。Qt 回调中的 SIGINT 会走 sys.excepthook，
+    # 因此这里也必须过滤，否则会弹出误导性的“启动失败”窗口。
+    if issubclass(exc_type, KeyboardInterrupt):
+        return
+
     text = "".join(traceback.format_exception(exc_type, exc, tb))
     try:
         with open(os.path.join(_base_dir(), "startup_error.log"), "a", encoding="utf-8") as f:
@@ -55,6 +60,9 @@ def main() -> int:
         return app_main()
     except SystemExit:
         raise
+    except KeyboardInterrupt:
+        # 没有进入 Qt 事件循环或平台不支持 SIGINT handler 时的最后一道兜底。
+        return 130
     except BaseException:  # 顶层兜底：记录后退出，不让 exe 静默消失
         _report_crash(*sys.exc_info())
         return 1
