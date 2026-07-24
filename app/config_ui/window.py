@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
 
 from .. import locators
 from ..engine import Task
+from ..flows import LOCATOR_ACTIONS
 from ..locators import TemplateLocator, TextLocator
 from ..logger import LOG_FILE, tail_log
 from ..settings import SNAPSHOTS_DIR
@@ -171,6 +172,8 @@ class ConfigWindow(QMainWindow):
         self.tabs.addTab(self.live_tab, "运行实况")
         self.tabs.addTab(self._build_cred_tab(), "登录凭据")
         self.setCentralWidget(self.tabs)
+        # 切到「运行实况」时刷新手动步骤下拉，反映流程编排页的最新编辑
+        self.tabs.currentChanged.connect(self._on_tab_changed)
         self._load_basic()
         self._load_db()
         self._wire_live()      # 订阅引擎事件总线 + 挂实时日志 handler + 空闲底图心跳
@@ -424,11 +427,10 @@ class ConfigWindow(QMainWindow):
         self.lbl_engine_state = QLabel("○ —")
         top.addWidget(self.lbl_engine_state)
         top.addStretch()
-        top.addWidget(QLabel("手动:"))
+        top.addWidget(QLabel("手动步骤:"))
         self.cmb_locator = QComboBox()
-        for name, loc in locators.ALL.items():
-            kind = "T1文字" if isinstance(loc, TextLocator) else "T2模板"
-            self.cmb_locator.addItem(f"{name}  [{kind}]", name)
+        self.cmb_locator.setMinimumWidth(300)
+        self._reload_step_choices()
         top.addWidget(self.cmb_locator)
         btn_one = QPushButton("测试选中")
         btn_all = QPushButton("测试全部")
@@ -588,8 +590,56 @@ class ConfigWindow(QMainWindow):
                 "截屏为全黑帧（WSL 抓屏 / macOS 未授权屏幕录制？），已跳过预览渲染")
             self._black_warned = True
 
-    def _selected_locator_name(self) -> str | None:
-        return self.cmb_locator.currentData()
+    # ---- 手动步骤下拉：枚举「流程编排」里配置的可定位步骤 ----
+
+    @staticmethod
+    def _step_has_target(step) -> bool:
+        """该步骤是否有可在屏幕上定位的目标（否则不进手动测试下拉）。
+
+        排除等待/按键/纯延时，以及「打给当前焦点」的无定位输入步骤。
+        """
+        if step.action not in LOCATOR_ACTIONS:
+            return False
+        return step.locator is not None or bool(step.ref)
+
+    @staticmethod
+    def _step_kind(step) -> str:
+        if step.locator is not None:
+            return "T2模板" if step.locator.kind == "template" else "T1文字"
+        loc = locators.ALL.get(step.ref)
+        return "T2模板" if isinstance(loc, TemplateLocator) else "T1文字"
+
+    def _reload_step_choices(self) -> None:
+        """按 流程 › 步骤 重建手动下拉，尽量保留当前选中项。"""
+        prev = self.cmb_locator.currentData()
+        self.cmb_locator.blockSignals(True)
+        self.cmb_locator.clear()
+        for flow in self.engine.flows.flows.values():
+            for step in flow.steps:
+                if not self._step_has_target(step):
+                    continue
+                text = f"{flow.title} › {step.label()}  [{self._step_kind(step)}]"
+                self.cmb_locator.addItem(text, (flow.key, step.id))
+        if prev is not None:
+            idx = self.cmb_locator.findData(prev)
+            if idx >= 0:
+                self.cmb_locator.setCurrentIndex(idx)
+        self.cmb_locator.blockSignals(False)
+
+    def _on_tab_changed(self, index: int) -> None:
+        if self.tabs.widget(index) is self.live_tab:
+            self._reload_step_choices()
+
+    def _resolve_step(self, data):
+        """(flow_key, step_id) → (flow, step)；找不到返回 (None, None)。"""
+        if not data:
+            return None, None
+        flow_key, step_id = data
+        flow = self.engine.flows.flows.get(flow_key)
+        if flow is None:
+            return None, None
+        step = next((s for s in flow.steps if s.id == step_id), None)
+        return flow, step
 
     def _capture_hidden(self):
         """隐藏配置窗口后截屏，避免自己挡住目标页面。"""
@@ -602,16 +652,21 @@ class ConfigWindow(QMainWindow):
             self.show()
 
     def _test_selected(self) -> None:
-        name = self._selected_locator_name()
-        if not name:
-            QMessageBox.information(self, "提示", "请先在左侧选择一个元素")
+        flow, step = self._resolve_step(self.cmb_locator.currentData())
+        if step is None:
+            QMessageBox.information(self, "提示", "请先选择一个步骤")
             return
-        self._run_test([name])
+        self._run_test([step])
 
     def _test_all(self) -> None:
-        self._run_test(list(locators.ALL.keys()))
+        steps = [s for flow in self.engine.flows.flows.values()
+                 for s in flow.steps if self._step_has_target(s)]
+        if not steps:
+            QMessageBox.information(self, "提示", "当前没有可定位的步骤")
+            return
+        self._run_test(steps)
 
-    def _run_test(self, names: list[str]) -> None:
+    def _run_test(self, steps: list) -> None:
         try:
             shot = self._capture_hidden()
         except Exception as e:
@@ -619,30 +674,45 @@ class ConfigWindow(QMainWindow):
             return
         annotated = shot.img.copy()
         reports = []
-        for name in names:
-            loc = locators.ALL[name]
+        for step in steps:
+            label = step.label()
+            try:
+                loc = step.build_locator()
+            except Exception as e:
+                reports.append(f"[{label}] ✘ 定位配置无效: {e}")
+                continue
+            if loc is None:
+                continue
             try:
                 res = self.vision.locate(loc, shot)
             except Exception as e:
-                reports.append(f"[{name}] ✘ 异常: {e}")
+                reports.append(f"[{label}] ✘ 异常: {e}")
                 continue
             draw_result(annotated, res)
-            reports.append(res.describe())
+            reports.append(f"[{label}]\n{res.describe()}")
         pix = np_to_pixmap(annotated)
         self.preview.setPixmap(pix.scaled(
             self.preview.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
-        self.diag_text.setPlainText("\n\n".join(reports))
+        self.diag_text.setPlainText("\n\n".join(reports) or "（无可定位步骤）")
 
     def _recapture_template(self) -> None:
-        name = self._selected_locator_name()
-        if not name:
-            QMessageBox.information(self, "提示", "请先在左侧选择一个元素")
+        flow, step = self._resolve_step(self.cmb_locator.currentData())
+        if step is None:
+            QMessageBox.information(self, "提示", "请先选择一个步骤")
             return
-        loc = locators.ALL[name]
+        label = step.label()
+        try:
+            loc = step.build_locator()
+        except Exception as e:
+            QMessageBox.warning(self, "定位配置无效", str(e))
+            return
+        if loc is None:
+            QMessageBox.information(self, "提示", f"步骤「{label}」无可定位目标")
+            return
         if isinstance(loc, TextLocator):
             if loc.fallback is None:
                 QMessageBox.warning(
-                    self, "提示", f"{name} 是文字锚点定位且无模板 fallback，无需截取模板")
+                    self, "提示", f"步骤「{label}」是文字锚点定位且无模板 fallback，无需截取模板")
                 return
             loc = loc.fallback
         try:
