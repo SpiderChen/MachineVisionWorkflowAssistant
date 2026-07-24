@@ -85,44 +85,64 @@ jobs:
           path: MachineVisionWorkflowAssistant-macos-arm64.zip
           if-no-files-found: error
 
-  # Intel（macos-13）：GitHub 构建机紧缺、常排长队。设为「尽力而为」：
-  # continue-on-error 不影响整体结论、40min 运行上限、且不进发布门禁（见 release.needs）。
-  build-macos-intel:
-    runs-on: macos-13
+  # universal2（在 macos-14 arm64 机上构建，彻底绕开紧缺的 Intel 构建机队列）：
+  # onnxruntime/opencv/PySide6 无 universal2 轮子，故不能靠 target_arch=universal2 一把梭；
+  # 改为原生 arm64 + Rosetta 下 x86_64 各打一份 .app，再 lipo 合并成胖二进制 → Intel 与
+  # Apple Silicon 通吃。暂设「尽力而为」（continue-on-error，不进发布门禁），跑稳后再收编。
+  build-macos-universal:
+    runs-on: macos-14
     continue-on-error: true
-    timeout-minutes: 40
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.11"
-          cache: pip
-      - name: Install dependencies
+      - name: 确保 Rosetta 2（运行 x86_64 Python 需要）
+        run: softwareupdate --install-rosetta --agree-to-license || true
+      - name: 安装 uv
+        uses: astral-sh/setup-uv@v6
+      - name: 构建 arm64 切片
         run: |
-          python -m pip install --upgrade pip wheel
-          pip install -r requirements.txt
-          pip install "pyobjc-framework-Cocoa" "pyobjc-framework-Quartz"
-          pip install pyinstaller
-      - name: Build .app
-        run: pyinstaller MachineVisionWorkflowAssistant.spec --noconfirm --clean
-      - name: Ad-hoc codesign (无开发者证书，仅让 Gatekeeper 少报错)
-        run: codesign --force --deep --sign - "dist/MachineVisionWorkflowAssistant.app" || true
+          uv python install cpython-3.11-macos-aarch64
+          uv venv --python cpython-3.11-macos-aarch64 .venv-arm
+          uv pip install --python .venv-arm/bin/python -r requirements.txt \
+            "pyobjc-framework-Cocoa" "pyobjc-framework-Quartz" pyinstaller
+          .venv-arm/bin/python -c "import platform; print('arm 切片解释器架构=', platform.machine())"
+          .venv-arm/bin/pyinstaller MachineVisionWorkflowAssistant.spec \
+            --noconfirm --clean --distpath dist-arm --workpath build-arm
+      - name: 构建 x86_64 切片（Rosetta）
+        run: |
+          uv python install cpython-3.11-macos-x86_64
+          uv venv --python cpython-3.11-macos-x86_64 .venv-x86
+          uv pip install --python .venv-x86/bin/python -r requirements.txt \
+            "pyobjc-framework-Cocoa" "pyobjc-framework-Quartz" pyinstaller
+          .venv-x86/bin/python -c "import platform; print('x86 切片解释器架构=', platform.machine())"
+          .venv-x86/bin/pyinstaller MachineVisionWorkflowAssistant.spec \
+            --noconfirm --clean --distpath dist-x86 --workpath build-x86
+      - name: 合并成 universal2 胖二进制
+        run: |
+          python3 scripts/make_universal.py \
+            dist-arm/MachineVisionWorkflowAssistant.app \
+            dist-x86/MachineVisionWorkflowAssistant.app \
+            dist-universal/MachineVisionWorkflowAssistant.app
+      - name: 校验主程序含双架构
+        run: lipo -archs dist-universal/MachineVisionWorkflowAssistant.app/Contents/MacOS/MachineVisionWorkflowAssistant
+      - name: Ad-hoc codesign（合并后原签名失效需重签）
+        run: codesign --force --deep --sign - "dist-universal/MachineVisionWorkflowAssistant.app" || true
       - name: Zip .app bundle
         run: |
-          cd dist
+          cd dist-universal
           ditto -c -k --sequesterRsrc --keepParent \
             "MachineVisionWorkflowAssistant.app" \
-            "../MachineVisionWorkflowAssistant-macos-intel.zip"
-      - name: Upload .app artifact
+            "../MachineVisionWorkflowAssistant-macos-universal2.zip"
+      - name: Upload universal2 artifact
         uses: actions/upload-artifact@v5
         with:
-          name: MachineVisionWorkflowAssistant-macos-intel
-          path: MachineVisionWorkflowAssistant-macos-intel.zip
+          name: MachineVisionWorkflowAssistant-macos-universal2
+          path: MachineVisionWorkflowAssistant-macos-universal2.zip
           if-no-files-found: error
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    # 只依赖稳定的两个构建；Intel 若卡队/失败不会阻塞发布（其产物若已就绪仍会被收进来）
+    # 只依赖稳定的两个构建；universal2 若失败不阻塞发布（其产物若已就绪仍会被 download-artifact 收进来）
     needs: [build-windows, build-macos-arm64]
     runs-on: ubuntu-latest
     steps:
