@@ -408,6 +408,15 @@ def _expand_roi(boxes, W, H, margin: float = 0.6) -> list:
             round(min(1.0, (r + mw) / W), 4), round(min(1.0, (btm + mh) / H), 4)]
 
 
+def relative_box_ratio(box, reference) -> list[float]:
+    """把区域换算成相对定位候选框中心、宽高的比例。"""
+    l, t, r, b = (float(v) for v in box)
+    return [round((l - reference.cx) / max(reference.w, 1), 3),
+            round((t - reference.cy) / max(reference.h, 1), 3),
+            round((r - reference.cx) / max(reference.w, 1), 3),
+            round((b - reference.cy) / max(reference.h, 1), 3)]
+
+
 def derive_dynamic_arith_locator(vision, shot, captcha_box, click_point,
                                  base: StepLocator | None = None):
     """用用户框选的蓝色区域生成「动态算式锚点」。

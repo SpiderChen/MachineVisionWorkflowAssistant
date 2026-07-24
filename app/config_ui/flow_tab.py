@@ -26,6 +26,7 @@ from ..qt_compat import (
 from ..flows import (
     ACTION_LABELS, KEY_CHOICES, LOCATOR_ACTIONS, SHOTS_DIR, VALUE_SOURCES,
     FlowError, Step, derive_dynamic_arith_locator, derive_locator,
+    relative_box_ratio,
 )
 from ..settings import TEMPLATES_DIR
 from ..vision import Screenshot
@@ -596,11 +597,9 @@ class FlowTab(QWidget):
             dynamic = derive_dynamic_arith_locator(
                 self.vision, shot, box, res.click_point or s.click or (c.cx, c.cy),
                 s.locator)
-            ratio_ref = dynamic[1] if dynamic is not None else c
-            ratio = [round((l - ratio_ref.cx) / max(ratio_ref.w, 1), 3),
-                     round((t - ratio_ref.cy) / max(ratio_ref.h, 1), 3),
-                     round((r - ratio_ref.cx) / max(ratio_ref.w, 1), 3),
-                     round((b - ratio_ref.cy) / max(ratio_ref.h, 1), 3)]
+            # captcha_ratio 的运行时参照始终是主定位命中的答案输入框。
+            # 动态算式锚点只负责直接识别；它失效时仍应从答案框推导蓝框位置。
+            ratio = relative_box_ratio((l, t, r, b), c)
             return ratio, got, (dynamic[0] if dynamic is not None else None)
 
         def _done(result):

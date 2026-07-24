@@ -1,10 +1,13 @@
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 
 from app.engine import Engine
-from app.flows import Step, StepLocator, derive_dynamic_arith_locator
+from app.flows import (
+    Step, StepLocator, derive_dynamic_arith_locator, relative_box_ratio,
+)
 from app.input_ctl import InputController, InputError, _DummyBackend
 from app.locators import Match, TextLocator
 from app.vision import Candidate, LocateResult, Screenshot, _text_matches
@@ -74,6 +77,13 @@ class DynamicCaptchaTests(unittest.TestCase):
         self.assertEqual(spec.template, "captcha_input.png")
         self.assertIsNotNone(spec.roi)
 
+    def test_captcha_crop_ratio_is_relative_to_answer_field(self):
+        answer_field = Candidate(box=(100, 100, 300, 140), text="", score=0.99)
+
+        ratio = relative_box_ratio((320, 100, 380, 140), answer_field)
+
+        self.assertEqual(ratio, [0.6, -0.5, 0.9, 0.5])
+
     def test_engine_calculates_directly_from_dynamic_anchor(self):
         engine = Engine.__new__(Engine)
         input_loc = TextLocator(anchor="用户名", match=Match.EXACT)
@@ -98,6 +108,36 @@ class DynamicCaptchaTests(unittest.TestCase):
         })()
 
         self.assertEqual(engine._solve_captcha(step, res), "10")
+
+    def test_engine_uses_answer_relative_crop_when_dynamic_anchor_misses(self):
+        engine = Engine.__new__(Engine)
+        shot_img = np.zeros((300, 500, 3), dtype=np.uint8)
+        shot_img[100:140, 320:380] = 255
+        shot = Screenshot(img=shot_img)
+        input_res = LocateResult(
+            locator=TextLocator(anchor="验证码", match=Match.EXACT), ok=True,
+            chosen=Candidate(box=(100, 100, 300, 140), text="", score=0.99),
+            click_point=(200, 120), shot=shot,
+        )
+        step = Step(
+            action="input", value_source="captcha",
+            locator=StepLocator(kind="text", anchor="验证码", match="exact"),
+            captcha_locator=StepLocator(kind="text", anchor="0*9=?", match="arith"),
+            captcha_ratio=[0.6, -0.5, 0.9, 0.5],
+        )
+        engine.vision = type("V", (), {
+            "locate": lambda self, loc, current_shot: LocateResult(
+                locator=loc, ok=False, shot=current_shot),
+            "capture": lambda self: shot,
+        })()
+
+        def _solve(_vision, crop):
+            self.assertEqual(crop.shape[:2], (40, 60))
+            self.assertTrue(np.all(crop == 255))
+            return "12", "6+6"
+
+        with patch("app.captcha.solve_arith", side_effect=_solve):
+            self.assertEqual(engine._solve_captcha(step, input_res), "12")
 
     def test_input_step_clicks_answer_field_then_types_calculated_result(self):
         engine = Engine.__new__(Engine)
