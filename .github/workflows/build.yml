@@ -18,8 +18,8 @@ jobs:
   build-windows:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
           cache: pip
@@ -41,13 +41,13 @@ jobs:
           Copy-Item -Recurse samples $rel/samples
           Compress-Archive -Path "$rel/*" -DestinationPath "release/MachineVisionWorkflowAssistant-windows.zip" -Force
       - name: Upload EXE artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: MachineVisionWorkflowAssistant-windows-exe
           path: dist/MachineVisionWorkflowAssistant.exe
           if-no-files-found: error
       - name: Upload Windows bundle
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: MachineVisionWorkflowAssistant-windows-bundle
           path: release/MachineVisionWorkflowAssistant-windows.zip
@@ -57,8 +57,8 @@ jobs:
   build-macos-arm64:
     runs-on: macos-14
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
           cache: pip
@@ -79,7 +79,7 @@ jobs:
             "MachineVisionWorkflowAssistant.app" \
             "../MachineVisionWorkflowAssistant-macos-arm64.zip"
       - name: Upload .app artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: MachineVisionWorkflowAssistant-macos-arm64
           path: MachineVisionWorkflowAssistant-macos-arm64.zip
@@ -92,8 +92,8 @@ jobs:
     continue-on-error: true
     timeout-minutes: 40
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
           cache: pip
@@ -114,7 +114,7 @@ jobs:
             "MachineVisionWorkflowAssistant.app" \
             "../MachineVisionWorkflowAssistant-macos-intel.zip"
       - name: Upload .app artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: MachineVisionWorkflowAssistant-macos-intel
           path: MachineVisionWorkflowAssistant-macos-intel.zip
@@ -127,7 +127,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Download all available artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           path: artifacts
       - name: Publish Release
