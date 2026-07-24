@@ -25,7 +25,7 @@ from ..qt_compat import (
 
 from ..flows import (
     ACTION_LABELS, KEY_CHOICES, LOCATOR_ACTIONS, SHOTS_DIR, VALUE_SOURCES,
-    FlowError, Step, derive_locator,
+    FlowError, Step, derive_dynamic_arith_locator, derive_locator,
 )
 from ..settings import TEMPLATES_DIR
 from ..vision import Screenshot
@@ -421,7 +421,10 @@ class FlowTab(QWidget):
         if s.locator is not None:
             sl = s.locator
             if sl.kind == "text":
-                lines = [f"文字锚点「{sl.anchor}」定位（T1）"]
+                if sl.match == "arith":
+                    lines = ["动态算式锚点定位（题目变化也可命中）"]
+                else:
+                    lines = [f"文字锚点「{sl.anchor}」定位（T1）"]
                 if sl.roi:
                     lines.append("已限定搜索区域消歧")
                 if sl.template:
@@ -580,23 +583,33 @@ class FlowTab(QWidget):
                     "目标输入框在当前截图上未定位成功，请先框选/修正目标输入框")
             c = res.chosen
             l, t, r, b = box
-            ratio = [round((l - c.cx) / max(c.w, 1), 3),
-                     round((t - c.cy) / max(c.h, 1), 3),
-                     round((r - c.cx) / max(c.w, 1), 3),
-                     round((b - c.cy) / max(c.h, 1), 3)]
             got = solve_arith(self.vision, shot.img[t:b, l:r])
-            return ratio, got
+            dynamic = derive_dynamic_arith_locator(
+                self.vision, shot, box, res.click_point or s.click or (c.cx, c.cy),
+                s.locator)
+            ratio_ref = dynamic[1] if dynamic is not None else c
+            ratio = [round((l - ratio_ref.cx) / max(ratio_ref.w, 1), 3),
+                     round((t - ratio_ref.cy) / max(ratio_ref.h, 1), 3),
+                     round((r - ratio_ref.cx) / max(ratio_ref.w, 1), 3),
+                     round((b - ratio_ref.cy) / max(ratio_ref.h, 1), 3)]
+            return ratio, got, (dynamic[0] if dynamic is not None else None)
 
         def _done(result):
-            ratio, got = result
+            ratio, got, dynamic_locator = result
+            if dynamic_locator is not None:
+                s.locator = dynamic_locator
+                s.ref = ""
             s.captcha_box = [int(v) for v in box]
             s.captcha_ratio = ratio
             self.canvas.set_annotation(s.box, s.click, s.captcha_box)
             extra = (f"试识别：{got[1]} = {got[0]} ✔" if got
                      else "⚠ 试识别失败：当前图上未解析出算术题（真实页面上再测）")
-            report = (self._reports.get(s.id) or self._locator_summary(s)).rstrip()
+            mode = ("已启用动态算式锚点（题目变化无需重新标注）"
+                    if dynamic_locator is not None
+                    else "⚠ 未找到完整算式锚点，仍使用原定位方式")
+            report = self._locator_summary(s).rstrip()
             self._reports[s.id] = (
-                f"{report}\n验证码图片区域已记录（相对目标框比例）\n{extra}")
+                f"{report}\n{mode}\n验证码图片区域已记录\n{extra}")
             self.txt_report.setPlainText(self._reports[s.id])
             self.lbl_hint.setText("验证码区域已记录（蓝框）。可重新框选覆盖")
 

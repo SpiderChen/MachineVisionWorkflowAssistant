@@ -82,9 +82,14 @@ class StepLocator:
             if tmpl is None:
                 raise FlowError(f"步骤定位缺少模板图: {name}")
             return tmpl
+        match = {
+            "exact": Match.EXACT,
+            "contains": Match.CONTAINS,
+            "arith": Match.ARITH,
+        }.get(self.match, Match.EXACT)
         return TextLocator(
             anchor=self.anchor,
-            match=Match.EXACT if self.match == "exact" else Match.CONTAINS,
+            match=match,
             roi=roi,
             pick=Pick(self.pick) if self.pick else None,
             click_offset_ratio=tuple(self.offset_ratio),
@@ -223,7 +228,7 @@ class Step:
 
     @classmethod
     def from_dict(cls, d: dict) -> "Step":
-        return cls(
+        step = cls(
             action=d.get("action", "click"), id=d.get("id") or _new_id(),
             name=d.get("name", ""), ref=d.get("ref", ""),
             locator=StepLocator.from_dict(d["locator"]) if d.get("locator") else None,
@@ -239,6 +244,15 @@ class Step:
             box=list(d["box"]) if d.get("box") else None,
             click=list(d["click"]) if d.get("click") else None,
         )
+        # 旧版会把标注当时的具体题目（如 0*9=?）保存为 EXACT。
+        # 加载旧 flows.yaml 时自动升级为动态算式匹配，无需用户删除重配。
+        if (step.action == "input" and step.value_source == "captcha"
+                and step.locator is not None and step.locator.kind == "text"
+                and step.locator.match == "exact"):
+            from .captcha import parse_arith
+            if parse_arith(step.locator.anchor) is not None:
+                step.locator.match = "arith"
+        return step
 
 
 @dataclass
@@ -387,6 +401,39 @@ def _expand_roi(boxes, W, H, margin: float = 0.6) -> list:
     mh = (btm - t) * margin
     return [round(max(0.0, (l - mw) / W), 4), round(max(0.0, (t - mh) / H), 4),
             round(min(1.0, (r + mw) / W), 4), round(min(1.0, (btm + mh) / H), 4)]
+
+
+def derive_dynamic_arith_locator(vision, shot, captcha_box, click_point,
+                                 base: StepLocator | None = None):
+    """用用户框选的蓝色区域生成「动态算式锚点」。
+
+    anchor 只保留当次题目作为界面说明；运行时 Match.ARITH 会匹配
+    任意可解析的「数字 运算符 数字」，不要求题目文字相同。
+    返回 (StepLocator, OCR Candidate)；蓝框内无完整算式时返回 None。
+    """
+    from .captcha import parse_arith
+
+    l, t, r, b = (int(v) for v in captcha_box)
+    lines = vision.ocr_lines(shot)
+    cands = [c for c in lines
+             if parse_arith(c.text or "") is not None
+             and _overlap_ratio(c.box, (l, t, r, b)) >= 0.35]
+    if not cands:
+        return None
+    chosen = max(cands, key=lambda c: _intersect_area(c.box, (l, t, r, b)))
+    cx, cy = (int(click_point[0]), int(click_point[1]))
+    H, W = shot.img.shape[:2]
+    sl = StepLocator(
+        kind="text", anchor=(chosen.text or "").strip(), match="arith",
+        roi=_expand_roi([(l, t, r, b)], W, H, margin=1.5),
+        pick="nearest",
+        offset_ratio=[round((cx - chosen.cx) / max(chosen.w, 1), 3),
+                      round((cy - chosen.cy) / max(chosen.h, 1), 3)],
+        template=base.template if base is not None else "",
+        tmpl_offset_ratio=(list(base.tmpl_offset_ratio)
+                           if base is not None else [0.0, 0.0]),
+    )
+    return sl, chosen
 
 
 def derive_locator(vision, shot, box, click_point, step_id) -> tuple[StepLocator, list[str]]:

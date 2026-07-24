@@ -19,6 +19,7 @@ from .settings import TEMPLATES_DIR
 class Match(Enum):
     EXACT = "exact"        # 归一化后全匹配（去空白、去尾部冒号）
     CONTAINS = "contains"  # 锚点词包含于识别文本
+    ARITH = "arith"        # 动态算式：匹配任意「数字 运算符 数字 = ?」
 
 
 class Direction(Enum):

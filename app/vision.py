@@ -40,6 +40,21 @@ def _norm(s: str) -> str:
     return s.rstrip(":：")
 
 
+def _text_matches(loc: TextLocator, text: str) -> bool:
+    """判定 OCR 文本是否命中定位器。
+
+    ARITH 不绑定标注时的具体题目，而是动态匹配任意可解析算式。
+    """
+    if loc.match == Match.ARITH:
+        from .captcha import parse_arith
+        return parse_arith(text or "") is not None
+    t = _norm(text or "")
+    anchor = _norm(loc.anchor)
+    if loc.match == Match.EXACT:
+        return t == anchor
+    return anchor in t
+
+
 @dataclass
 class Candidate:
     box: tuple[int, int, int, int]      # (l, t, r, b) 截屏原图坐标
@@ -318,11 +333,9 @@ class Vision:
             res.reason = str(e)
             return self._try_fallback(loc, shot, res)
 
-        anchor = _norm(loc.anchor)
         matches = []
         for c in lines:
-            t = _norm(c.text or "")
-            if (t == anchor) if loc.match == Match.EXACT else (anchor in t):
+            if _text_matches(loc, c.text or ""):
                 matches.append(c)
         res.matches = matches
         cands = list(matches)
@@ -512,12 +525,9 @@ class Vision:
         """宽松存在性判定（页面状态特征用）：不要求唯一，命中即真。"""
         try:
             if isinstance(locator, TextLocator):
-                anchor = _norm(locator.anchor)
                 cands = []
                 for c in self.ocr_lines(shot, locator.roi):
-                    t = _norm(c.text or "")
-                    hit = (t == anchor) if locator.match == Match.EXACT else (anchor in t)
-                    if hit:
+                    if _text_matches(locator, c.text or ""):
                         cands.append(c)
                 if locator.roi:
                     cands = [c for c in cands if self._in_roi(c, locator.roi, shot)]

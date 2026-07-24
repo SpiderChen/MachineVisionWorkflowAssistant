@@ -472,15 +472,40 @@ class Engine:
 
     def _solve_captcha(self, step: Step, res: LocateResult | None) -> str:
         """按标注比例裁剪验证码图片区域 → 算术题识别（app.captcha）。"""
-        from .captcha import solve_arith
+        from .captcha import parse_arith, solve_arith
 
         if res is None or res.chosen is None or res.shot is None:
             raise StepError("验证码步骤需要框选定位目标（输入框），无法计算图片区域")
         c = res.chosen
-        rl, rt, rr, rb = step.captcha_ratio
+
+        # 动态算式定位已经拿到当前 OCR 文本，直接计算；
+        # 不再二次裁剪/OCR，避免蓝框轻微偏移导致「定位成功但无法解析」。
+        loc = res.locator
+        if (isinstance(loc, L.TextLocator) and loc.match == L.Match.ARITH
+                and not res.used_fallback):
+            direct = parse_arith(c.text or "")
+            if direct is not None:
+                answer, expr = direct
+                logger.info("验证码动态锚点 %s → %s", expr, answer)
+                return answer
+
         H, W = res.shot.img.shape[:2]
-        l = max(0, int(c.cx + rl * c.w)); t = max(0, int(c.cy + rt * c.h))
-        r = min(W, int(c.cx + rr * c.w)); b = min(H, int(c.cy + rb * c.h))
+
+        if res.used_fallback and step.box and step.captcha_box:
+            # T2 候选框是「目标输入框模板」，尺寸与 OCR 文字框不同。
+            # 用标注时蓝框相对红框的几何关系重建，避免混用两种框的比例。
+            bl, bt, br, bb = (float(v) for v in step.box)
+            ql, qt, qr, qb = (float(v) for v in step.captcha_box)
+            sx = c.w / max(br - bl, 1.0)
+            sy = c.h / max(bb - bt, 1.0)
+            l = max(0, int(c.box[0] + (ql - bl) * sx))
+            t = max(0, int(c.box[1] + (qt - bt) * sy))
+            r = min(W, int(c.box[0] + (qr - bl) * sx))
+            b = min(H, int(c.box[1] + (qb - bt) * sy))
+        else:
+            rl, rt, rr, rb = step.captcha_ratio
+            l = max(0, int(c.cx + rl * c.w)); t = max(0, int(c.cy + rt * c.h))
+            r = min(W, int(c.cx + rr * c.w)); b = min(H, int(c.cy + rb * c.h))
         got = solve_arith(self.vision, res.shot.img[t:b, l:r]) if r > l and b > t else None
         if got is None:
             raise StepError("验证码识别失败（无法解析算术题），请人工登录",
