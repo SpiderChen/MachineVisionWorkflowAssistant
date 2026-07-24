@@ -245,6 +245,11 @@ class FlowTab(QWidget):
         add_menu.addAction("等待秒数步骤", lambda: self._add_plain("sleep"))
         self.btn_add.setMenu(add_menu)
         lv.addWidget(self.btn_add)
+        self.btn_test_flow = QPushButton("▶ 执行完整流程")
+        self.btn_test_flow.setToolTip(
+            "从第一步到最后一步真实执行当前流程；会实际点击、输入、提交或打印。")
+        self.btn_test_flow.clicked.connect(self._test_flow)
+        lv.addWidget(self.btn_test_flow)
         btn_save = QPushButton("💾 保存流程")
         btn_save.clicked.connect(self._save)
         lv.addWidget(btn_save)
@@ -758,10 +763,37 @@ class FlowTab(QWidget):
 
         self._task.start(status.rstrip("…"), fn, _finished)
 
+    def _request_test_context(self, steps: list[Step]) -> dict | None:
+        """收集完整流程或单步测试需要的动态输入；取消时返回 None。"""
+        ctx = {}
+        if any(s.action == "input" and s.value_source == "vehicle_no" for s in steps):
+            text, ok = QInputDialog.getText(self, "动作测试", "测试用车辆自编号：")
+            if not ok:
+                return None
+            if not text.strip():
+                QMessageBox.warning(self, "无法执行", "车辆自编号不能为空")
+                return None
+            ctx["vehicle_no"] = text.strip()
+        return ctx
+
+    def _test_flow(self) -> None:
+        if self.flow is None:
+            QMessageBox.information(self, "提示", "请先选择一个流程")
+            return
+        if not self.flow.steps:
+            QMessageBox.information(self, "提示", f"流程「{self.flow.title}」没有步骤")
+            return
+        self._run_action_test(self.flow.title, list(self.flow.steps))
+
     def _test_step(self) -> None:
         if self.step is None:
             QMessageBox.information(self, "提示", "请先选择一个步骤")
             return
+        title = f"{self.flow.title if self.flow else '未命名流程'} › {self.step.label()}"
+        self._run_action_test(title, [self.step])
+
+    def _run_action_test(self, title: str, steps: list[Step]) -> None:
+        """在后台真实执行给定步骤，并把最终画面与逐步结果回显到编排页。"""
         if self._task.busy:
             QMessageBox.information(self, "正在处理", "上一个 OCR/动作任务尚未完成，请稍候。")
             return
@@ -769,28 +801,19 @@ class FlowTab(QWidget):
             QMessageBox.information(self, "引擎忙碌", "正式任务正在执行，请完成后再测试动作。")
             return
 
-        step = self.step
-        ctx = {}
-        if step.action == "input" and step.value_source == "vehicle_no":
-            text, ok = QInputDialog.getText(self, "动作测试", "测试用车辆自编号：")
-            if not ok:
-                return
-            if not text.strip():
-                QMessageBox.warning(self, "无法执行", "车辆自编号不能为空")
-                return
-            ctx["vehicle_no"] = text.strip()
-
-        title = f"{self.flow.title if self.flow else '未命名流程'} › {step.label()}"
+        ctx = self._request_test_context(steps)
+        if ctx is None:
+            return
         top = self.window()
         self.setEnabled(False)
-        self.lbl_hint.setText(f"正在真实执行「{step.label()}」…")
-        logger.info("开始流程编排动作测试：%s", title)
+        self.lbl_hint.setText(f"正在真实执行「{title}」（{len(steps)} 步）…")
+        logger.info("开始流程编排动作测试：%s（%d 步）", title, len(steps))
         top.hide()
         QGuiApplication.processEvents()
         time.sleep(0.5)
 
         def _work():
-            self.engine.execute_steps_sync(title, [step], ctx)
+            self.engine.execute_steps_sync(title, steps, ctx)
             time.sleep(0.2)
             try:
                 return self.vision.capture(), None
@@ -815,13 +838,15 @@ class FlowTab(QWidget):
             if final_shot is not None:
                 self._canvas_preview = True
                 self.canvas.set_image(final_shot.img)
-                self.lbl_hint.setText("动作已真实执行；画布显示执行后的屏幕")
+                self.lbl_hint.setText(f"「{title}」已真实执行；画布显示执行后的屏幕")
             else:
-                self.lbl_hint.setText("动作已执行，但最终屏幕截取失败")
+                self.lbl_hint.setText(f"「{title}」已执行，但最终屏幕截取失败")
             suffix = f"\n执行后截屏失败：{capture_error}" if capture_error else ""
-            self.txt_report.setPlainText(f"✔ 已执行动作\n{step.label()}{suffix}")
+            report = "\n".join(f"✔ {i}. {s.label()}" for i, s in enumerate(steps, 1))
+            self.txt_report.setPlainText(f"✔ 已完成真实执行\n{report}{suffix}")
 
-        if not self._task.start("动作测试", _work, _finished):
+        if not self._task.start("完整流程测试" if len(steps) > 1 else "动作测试",
+                                _work, _finished):
             top.show()
             top.raise_()
             top.activateWindow()
