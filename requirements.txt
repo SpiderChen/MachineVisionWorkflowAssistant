@@ -1,4 +1,4 @@
-# 运行环境：Windows 10/11，Python 3.10+（README §2）
+# 运行环境：Windows Server 2016、Windows 10/11，Python 3.10+（README §2）
 # 视觉与输入内核
 mss                                  # 快速截屏，多显示器
 opencv-python                        # 模板匹配 / 图像处理
@@ -10,7 +10,8 @@ Pillow                               # 托盘图标绘制
 
 # 托盘与配置界面
 pystray
-PySide6
+PyQt5==5.15.11; sys_platform == "win32"  # Qt5 兼容 Windows Server 2016
+PySide6; sys_platform != "win32"         # macOS / Linux 继续使用 Qt6
 
 # 触发源
 fastapi

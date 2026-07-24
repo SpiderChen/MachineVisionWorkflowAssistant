@@ -54,7 +54,10 @@ hiddenimports += [
 ]
 
 block_cipher = None
-excludes = ["tkinter", "matplotlib", "pytest", "PySide6.QtWebEngineCore"]
+excludes = [
+    "tkinter", "matplotlib", "pytest",
+    "PyQt5.QtWebEngine", "PyQt5.QtWebEngineCore", "PySide6.QtWebEngineCore",
+]
 
 a = Analysis(
     ["run.py"],

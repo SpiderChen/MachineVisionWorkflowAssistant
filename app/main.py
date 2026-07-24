@@ -95,14 +95,13 @@ def _run_service(settings, vision, inputs, engine, headless: bool) -> int:
 
     # ---- UI 模式：QApplication(主线程) + pystray(独立线程)，经 Qt 信号桥接 ----
     try:
-        from PySide6.QtCore import QObject, Signal
-        from PySide6.QtWidgets import QApplication
-
         from .config_ui import ConfigWindow, window as cw
+        from .qt_compat import QApplication, QObject, QT_API, Signal, qt_exec
         from .tray import Tray
-    except ImportError as e:
-        logger.warning("UI 依赖不可用（%s），回退 headless 模式", e)
-        return _run_service_headless_fallback(stop_all, shutdown)
+    except (ImportError, OSError) as e:
+        logger.exception("UI 依赖加载失败")
+        shutdown()
+        raise RuntimeError(f"UI 依赖加载失败：{e}") from e
 
     class Bridge(QObject):
         open_config = Signal()
@@ -121,7 +120,7 @@ def _run_service(settings, vision, inputs, engine, headless: bool) -> int:
         win.raise_()
         win.activateWindow()
         logger.info("macOS：以配置窗口模式运行（无菜单栏托盘）")
-        rc = app.exec()
+        rc = qt_exec(app)
         shutdown()
         return rc
     app.setQuitOnLastWindowClosed(False)
@@ -140,9 +139,9 @@ def _run_service(settings, vision, inputs, engine, headless: bool) -> int:
     )
     engine.notifier = tray.notify
     tray.run_detached()
-    logger.info("托盘已就绪（双击图标打开配置）")
+    logger.info("托盘已就绪（%s；双击图标打开配置）", QT_API)
 
-    rc = app.exec()
+    rc = qt_exec(app)
     shutdown()
     tray.stop()
     return rc
@@ -158,10 +157,8 @@ def _run_config_window(settings, vision, engine) -> int:
     """直接打开配置窗口（不依赖托盘）。WSL 下配合 QT_QPA_PLATFORM=wayland 使用。"""
     import os
 
-    from PySide6.QtGui import QFont, QFontDatabase
-    from PySide6.QtWidgets import QApplication
-
     from .config_ui import ConfigWindow
+    from .qt_compat import QApplication, QFont, QFontDatabase, QT_API, qt_exec
 
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(True)      # 无托盘：关窗即退出
@@ -179,20 +176,10 @@ def _run_config_window(settings, vision, engine) -> int:
     win.showNormal()
     win.raise_()
     win.activateWindow()
-    logger.info("配置窗口已打开（--ui 模式，无托盘）")
-    rc = app.exec()
+    logger.info("配置窗口已打开（%s；--ui 模式，无托盘）", QT_API)
+    rc = qt_exec(app)
     engine.stop()
     return rc
-
-
-def _run_service_headless_fallback(stop_all, shutdown) -> int:
-    try:
-        while not stop_all.wait(1.0):
-            pass
-    except KeyboardInterrupt:
-        pass
-    shutdown()
-    return 0
 
 
 def main() -> int:

@@ -38,7 +38,7 @@
 
 | 组件 | 职责 | 实现 |
 |------|------|------|
-| 托盘 & 配置 UI | 常驻任务栏，调出配置页，启停开关 | `pystray` + `PySide6`（或 `tkinter`） |
+| 托盘 & 配置 UI | 常驻任务栏，调出配置页，启停开关 | `pystray` + Qt（Windows 用 `PyQt5`，macOS/Linux 用 `PySide6`） |
 | 触发监听 | DB 轮询 / 接收 HTTP 回调，产生任务入队 | 轮询线程 + `FastAPI(uvicorn)` |
 | 执行引擎 | 消费任务，截屏→识别→点击→输入→校验 | `mss` + `opencv-python` + `pynput`/`SendInput` |
 
@@ -52,13 +52,15 @@
 | 鼠标/键盘 | Win32 `SendInput`（经 `pynput`/`pywin32`） | 系统级真实事件，任何程序都认 |
 | 文本注入 | `SendInput` + `KEYEVENTF_UNICODE` | 以键盘事件直接注入 Unicode 字符（自编号的字母数字与中文皆可），不经输入法、不占用剪贴板；剪贴板粘贴仅作个别程序不认注入时的后备 |
 | 托盘 | `pystray` | 轻量，右键菜单 + 双击事件 |
-| 配置界面 | `PySide6` | 开关、模板管理、坐标微调、日志查看 |
+| 配置界面 | Qt | Windows 使用兼容 Server 2016 的 `PyQt5/Qt5`，macOS/Linux 使用 `PySide6/Qt6` |
 | API 触发 | `FastAPI` + `uvicorn` | 提供 `POST /print` 接口 |
 | DB 触发 | 轮询待打印表（推荐）或 CDC | 见 §4 |
 | DB 访问 | SQLAlchemy Core + `pyodbc` | SQL Server 主力，一套代码兼容 MySQL/PG/Oracle |
 | 打包 | `PyInstaller` | 打成单个 exe，开机自启放启动项 |
 
-运行环境要求：**Windows 10/11**，Python 3.10+。采用 OCR 锚点定位后，**不再要求各部署机分辨率/缩放一致**（见 §2.1）。
+运行环境要求：**Windows Server 2016、Windows 10/11**，Python 3.10+。Windows 使用
+PyQt5/Qt5 兼容旧系统；macOS/Linux 使用 PySide6/Qt6。采用 OCR 锚点定位后，**不再要求
+各部署机分辨率/缩放一致**（见 §2.1）。
 
 ### 2.1 元素定位：三级策略（应对"用户屏幕不固定"）
 
@@ -308,7 +310,7 @@ AutoPrintDeliveryOrder/
 ├── app/
 │   ├── main.py                # 入口：拉起托盘 + 各线程
 │   ├── tray.py                # pystray 托盘
-│   ├── config_ui/             # PySide6 配置窗口（window.py + flow_tab.py 流程编排）
+│   ├── config_ui/             # Qt 配置窗口（window.py + flow_tab.py 流程编排）
 │   ├── locators.py            # 内置注册元素定位（声明式，代码维护，见 §2.1）
 │   ├── flows.py               # 工作流数据模型 + flows.yaml 存取 + 框选→定位自动推导
 │   ├── vision.py              # 截屏 + OCR锚点/模板定位 + 等待出现/消失
@@ -345,7 +347,7 @@ AutoPrintDeliveryOrder/
 
 - [ ] **M1 视觉与输入内核**：`vision.py` + `input_ctl.py`，命令行输入车辆自编号即可完成"定位→输入→点打印"（验证核心可行性，1~2 天）
 - [ ] **M2 引擎与触发**：状态机 + 队列 + DB 轮询 + FastAPI（1~2 天）
-- [ ] **M3 托盘与配置页**：pystray + PySide6 + 模板框选截取器（2~3 天）
+- [ ] **M3 托盘与配置页**：pystray + Qt + 模板框选截取器（2~3 天）
 - [ ] **M4 自动登录**：登录流程 + DPAPI 凭据 +（预留）验证码桩（1 天）
 - [ ] **M5 加固与打包**：失败快照、连败熔断、PyInstaller 打包、开机自启（1~2 天）
 - [ ] **M6（可选，按需启动）YOLO 兜底定位**：用 M1~M5 运行期积累的失败快照做标注训练集，训练 YOLO11n 作为 T3 定位器；仅当 OCR 锚点+模板在真实环境失败率不可接受时才做

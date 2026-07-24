@@ -86,7 +86,7 @@ jobs:
           if-no-files-found: error
 
   # universal2（在 macos-14 arm64 机上构建，彻底绕开紧缺的 Intel 构建机队列）：
-  # onnxruntime/opencv/PySide6 无 universal2 轮子，故不能靠 target_arch=universal2 一把梭；
+  # onnxruntime/opencv/Qt 绑定无 universal2 轮子，故不能靠 target_arch=universal2 一把梭；
   # 改为原生 arm64 + Rosetta 下 x86_64 各打一份 .app，再 lipo 合并成胖二进制 → Intel 与
   # Apple Silicon 通吃。暂设「尽力而为」（continue-on-error，不进发布门禁），跑稳后再收编。
   build-macos-universal:

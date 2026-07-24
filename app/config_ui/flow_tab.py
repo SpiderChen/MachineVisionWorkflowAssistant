@@ -15,13 +15,12 @@ import time
 import cv2
 import numpy as np
 
-from PySide6.QtCore import QPoint, QRect, Qt, Signal
-from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap
-from PySide6.QtWidgets import (
+from ..qt_compat import (
     QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout, QGroupBox,
     QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem,
-    QMenu, QMessageBox, QPlainTextEdit, QPushButton, QSizePolicy, QSplitter,
-    QToolButton, QVBoxLayout, QWidget,
+    QMenu, QMessageBox, QPlainTextEdit, QPoint, QPushButton, QPixmap, QRect,
+    QImage, QPainter, QPen, QColor, QSizePolicy, QSplitter, QToolButton, Qt,
+    QVBoxLayout, QWidget, Signal, event_pos, qt_exec,
 )
 
 from ..flows import (
@@ -141,24 +140,24 @@ class AnnotCanvas(QWidget):
         if self._pix is None:
             return
         if event.button() == Qt.LeftButton:
-            self._drag_start = event.position().toPoint()
+            self._drag_start = event_pos(event)
             self._drag_cur = self._drag_start
             self.update()
         elif event.button() == Qt.RightButton:
-            pt = self._to_img(event.position().toPoint())
+            pt = self._to_img(event_pos(event))
             if pt:
                 self.pointPicked.emit(*pt)
 
     def mouseMoveEvent(self, event):
         if self._drag_start:
-            self._drag_cur = event.position().toPoint()
+            self._drag_cur = event_pos(event)
             self.update()
 
     def mouseReleaseEvent(self, event):
         if event.button() != Qt.LeftButton or not self._drag_start:
             return
         p0 = self._to_img(self._drag_start)
-        p1 = self._to_img(event.position().toPoint())
+        p1 = self._to_img(event_pos(event))
         self._drag_start = self._drag_cur = None
         self.update()
         if not p0 or not p1:
@@ -622,7 +621,7 @@ class FlowTab(QWidget):
         menu.addAction("⬇ 下移", lambda: self._move_step(1))
         menu.addSeparator()
         menu.addAction("删除步骤", self._delete_step)
-        menu.exec(self.list_steps.mapToGlobal(pos))
+        qt_exec(menu, self.list_steps.mapToGlobal(pos))
 
     def _on_rows_moved(self, *_) -> None:
         """拖拽结束后：按列表当前顺序回写 flow.steps，并重排序号。"""

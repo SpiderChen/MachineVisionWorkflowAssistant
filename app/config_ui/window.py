@@ -1,4 +1,4 @@
-"""PySide6 配置窗口（README §6）：四个 Tab —— 基础 / 流程编排 / 运行实况 / 登录凭据。
+"""Qt 配置窗口（README §6）：四个 Tab —— 基础 / 流程编排 / 运行实况 / 登录凭据。
 
 「运行实况」被动镜像引擎的真实执行：左=实时标注截图（引擎真正看到的那一帧，黄=候选
 橙=约束后 绿=选中 红点=点击点）+ 当前步骤横幅，右=实时日志；并内置手动「测试定位 /
@@ -15,12 +15,12 @@ import time
 
 import cv2
 
-from PySide6.QtCore import QObject, QRect, QTimer, Qt, Signal
-from PySide6.QtGui import QGuiApplication, QImage, QPainter, QPixmap
-from PySide6.QtWidgets import (
+from ..qt_compat import (
     QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout, QHBoxLayout,
-    QInputDialog, QLabel, QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit,
-    QPushButton, QSpinBox, QSplitter, QTabWidget, QVBoxLayout, QWidget,
+    QGuiApplication, QImage, QInputDialog, QLabel, QLineEdit, QMainWindow,
+    QMessageBox, QObject, QPainter, QPixmap, QPlainTextEdit, QPushButton, QRect,
+    QSpinBox, QSplitter, QTabWidget, QTimer, Qt, QVBoxLayout, QWidget, Signal,
+    event_pos,
 )
 
 from .. import locators
@@ -110,15 +110,15 @@ class SnipOverlay(QWidget):
     def paintEvent(self, event):
         p = QPainter(self)
         p.drawPixmap(self.rect(), self._pix)
-        p.fillRect(self.rect(), Qt.GlobalColor.transparent)
+        p.fillRect(self.rect(), Qt.transparent)
         p.setOpacity(0.35)
-        p.fillRect(self.rect(), Qt.GlobalColor.black)
+        p.fillRect(self.rect(), Qt.black)
         if self._origin and self._current:
             sel = QRect(self._origin, self._current).normalized()
             p.setOpacity(1.0)
             src = self._map_to_pix(sel)
             p.drawPixmap(sel, self._pix, src)
-            p.setPen(Qt.GlobalColor.red)
+            p.setPen(Qt.red)
             p.drawRect(sel)
         p.end()
 
@@ -129,13 +129,13 @@ class SnipOverlay(QWidget):
                      int(rect.width() * sx), int(rect.height() * sy))
 
     def mousePressEvent(self, event):
-        self._origin = event.position().toPoint()
+        self._origin = event_pos(event)
         self._current = self._origin
         self.update()
 
     def mouseMoveEvent(self, event):
         if self._origin:
-            self._current = event.position().toPoint()
+            self._current = event_pos(event)
             self.update()
 
     def mouseReleaseEvent(self, event):
