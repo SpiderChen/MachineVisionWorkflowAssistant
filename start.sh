@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 一键启动（WSL / Linux 开发用）：建/复用 venv → 装依赖 → 完整常驻启动。
+# 一键启动（WSL / Linux / Windows Git Bash）：建/复用 venv → 装依赖 → 完整常驻启动。
 #
 # 默认完整常驻 = 托盘图标 + 配置窗口 + DB 轮询 + HTTP API（等价 `python run.py`）。
 # 需要图形环境：Windows 11 的 WSLg 自动提供；否则装 X server，或改用 --headless。
@@ -17,7 +17,7 @@ set -euo pipefail
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 VENV_DIR="${VENV_DIR:-.venv}"
-PY="${PYTHON:-python3}"
+PY="${PYTHON:-}"
 REQ="requirements.txt"
 STAMP="$VENV_DIR/.req.sha256"
 
@@ -25,7 +25,17 @@ log()  { printf '\033[36m[start]\033[0m %s\n' "$*"; }
 warn() { printf '\033[33m[start]\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[31m[start]\033[0m %s\n' "$*" >&2; exit 1; }
 
-command -v "$PY" >/dev/null 2>&1 || die "找不到 $PY，请先安装 Python 3.10+"
+if [ -z "$PY" ]; then
+  if command -v python3 >/dev/null 2>&1; then
+    PY="python3"
+  elif command -v python >/dev/null 2>&1; then
+    PY="python"
+  else
+    die "找不到 Python，请先安装 Python 3.10+"
+  fi
+elif ! command -v "$PY" >/dev/null 2>&1; then
+  die "找不到 $PY，请检查 PYTHON 环境变量或安装 Python 3.10+"
+fi
 
 # RECREATE=1 → 删掉旧环境重来
 if [ "${RECREATE:-0}" = "1" ] && [ -d "$VENV_DIR" ]; then
@@ -40,8 +50,17 @@ if [ ! -d "$VENV_DIR" ]; then
   "$PY" -m venv "$VENV_DIR" || die "创建 venv 失败，缺 venv 模块请装：sudo apt install python3-venv"
   FRESH=1
 fi
-# shellcheck disable=SC1091
-source "$VENV_DIR/bin/activate"
+if [ -f "$VENV_DIR/bin/activate" ]; then
+  # Linux / WSL
+  # shellcheck disable=SC1091
+  source "$VENV_DIR/bin/activate"
+elif [ -f "$VENV_DIR/Scripts/activate" ]; then
+  # Windows Git Bash
+  # shellcheck disable=SC1091
+  source "$VENV_DIR/Scripts/activate"
+else
+  die "虚拟环境不完整：找不到 $VENV_DIR/bin/activate 或 $VENV_DIR/Scripts/activate"
+fi
 
 # 2) 依赖：首次创建 / requirements 变更 / REINSTALL=1 才装，否则秒起
 need_install=0
