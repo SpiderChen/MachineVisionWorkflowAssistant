@@ -139,6 +139,57 @@ class DynamicCaptchaTests(unittest.TestCase):
         with patch("app.captcha.solve_arith", side_effect=_solve):
             self.assertEqual(engine._solve_captcha(step, input_res), "12")
 
+    def test_engine_clicks_captcha_to_refresh_and_retries(self):
+        engine = Engine.__new__(Engine)
+        first_shot = Screenshot(img=np.zeros((300, 500, 3), dtype=np.uint8))
+        second_shot = Screenshot(img=np.ones((300, 500, 3), dtype=np.uint8))
+        answer = Candidate(box=(100, 100, 300, 140), text="", score=0.99)
+        input_res = LocateResult(
+            locator=TextLocator(anchor="验证码", match=Match.EXACT), ok=True,
+            chosen=answer, click_point=(200, 120), shot=first_shot,
+        )
+        refreshed_res = LocateResult(
+            locator=input_res.locator, ok=True, chosen=answer,
+            click_point=(200, 120), shot=second_shot,
+        )
+        step = Step(
+            action="input", value_source="captcha",
+            locator=StepLocator(kind="text", anchor="验证码", match="exact"),
+            captcha_ratio=[0.6, -0.5, 0.9, 0.5],
+        )
+
+        class _Vision:
+            def __init__(self, case):
+                self.case = case
+
+            def capture(self):
+                return second_shot
+
+            def locate(self, loc, shot):
+                self.case.assertIs(shot, second_shot)
+                return refreshed_res
+
+            def to_screen(self, shot, point):
+                return point
+
+        class _Inputs:
+            def __init__(self):
+                self.clicks = []
+
+            def click(self, x, y):
+                self.clicks.append((x, y))
+
+        engine.vision = _Vision(self)
+        engine.inputs = _Inputs()
+
+        with patch("app.captcha.solve_arith",
+                   side_effect=[None, ("12", "6+6")]) as solve, \
+                patch("app.engine.time.sleep"):
+            self.assertEqual(engine._solve_captcha(step, input_res), "12")
+
+        self.assertEqual(engine.inputs.clicks, [(350, 120)])
+        self.assertEqual(solve.call_count, 2)
+
     def test_input_step_clicks_answer_field_then_types_calculated_result(self):
         engine = Engine.__new__(Engine)
         shot = Screenshot(img=np.zeros((300, 500, 3), dtype=np.uint8))

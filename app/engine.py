@@ -25,6 +25,9 @@ from .vision import LocateResult, Screenshot, Vision
 
 logger = logging.getLogger(__name__)
 
+_CAPTCHA_MAX_REFRESHES = 3
+_CAPTCHA_REFRESH_DELAY = 0.8
+
 
 class StepError(Exception):
     """流程中某一步失败。可携带失败瞬间的截图用于快照。"""
@@ -471,53 +474,89 @@ class Engine:
         raise StepError(f"未知输入值来源: {src}")
 
     def _solve_captcha(self, step: Step, res: LocateResult | None) -> str:
-        """按标注比例裁剪验证码图片区域 → 算术题识别（app.captcha）。"""
+        """识别算术验证码；模糊时点击验证码图片刷新并自动重试。"""
         from .captcha import parse_arith, solve_arith
 
         if res is None or res.chosen is None or res.shot is None:
             raise StepError("验证码步骤需要框选定位目标（输入框），无法计算图片区域")
-        c = res.chosen
+        current = res
 
-        # 如果保存了验证码算式锚点，优先直接用它定位并解析，不再二次裁剪/OCR。
-        # 这不会影响主输入框定位；主定位仍由 res.chosen 负责。
-        captcha_loc = step.captcha_locator
-        if captcha_loc is not None and not res.used_fallback:
-            try:
-                qres = self.vision.locate(captcha_loc.to_locator(
-                    f"step:{step.label()}.captcha"), res.shot)
-            except Exception:
-                qres = None
-            if qres is not None and qres.ok and qres.chosen is not None:
-                direct = parse_arith(qres.chosen.text or "")
-                if direct is not None:
-                    answer, expr = direct
-                    logger.info("验证码动态锚点 %s → %s", expr, answer)
-                    return answer
+        for attempt in range(_CAPTCHA_MAX_REFRESHES + 1):
+            c = current.chosen
+            captcha_loc = step.captcha_locator
 
-        H, W = res.shot.img.shape[:2]
+            # 动态算式锚点优先直接读取当前题目；主定位仍只负责答案输入框。
+            if captcha_loc is not None and not current.used_fallback:
+                try:
+                    qres = self.vision.locate(captcha_loc.to_locator(
+                        f"step:{step.label()}.captcha"), current.shot)
+                except Exception:
+                    qres = None
+                if qres is not None and qres.ok and qres.chosen is not None:
+                    direct = parse_arith(qres.chosen.text or "")
+                    if direct is not None:
+                        answer, expr = direct
+                        logger.info("验证码动态锚点 %s → %s", expr, answer)
+                        return answer
 
-        if res.used_fallback and step.box and step.captcha_box:
-            # T2 候选框是「目标输入框模板」，尺寸与 OCR 文字框不同。
-            # 用标注时蓝框相对红框的几何关系重建，避免混用两种框的比例。
-            bl, bt, br, bb = (float(v) for v in step.box)
-            ql, qt, qr, qb = (float(v) for v in step.captcha_box)
-            sx = c.w / max(br - bl, 1.0)
-            sy = c.h / max(bb - bt, 1.0)
-            l = max(0, int(c.box[0] + (ql - bl) * sx))
-            t = max(0, int(c.box[1] + (qt - bt) * sy))
-            r = min(W, int(c.box[0] + (qr - bl) * sx))
-            b = min(H, int(c.box[1] + (qb - bt) * sy))
-        else:
-            rl, rt, rr, rb = step.captcha_ratio
-            l = max(0, int(c.cx + rl * c.w)); t = max(0, int(c.cy + rt * c.h))
-            r = min(W, int(c.cx + rr * c.w)); b = min(H, int(c.cy + rb * c.h))
-        got = solve_arith(self.vision, res.shot.img[t:b, l:r]) if r > l and b > t else None
-        if got is None:
-            raise StepError("验证码识别失败（无法解析算术题），请人工登录",
-                            self.vision.capture())
-        answer, expr = got
-        logger.info("验证码 %s → %s", expr, answer)
-        return answer
+            H, W = current.shot.img.shape[:2]
+            if current.used_fallback and step.box and step.captcha_box:
+                # T2 候选框是「目标输入框模板」，尺寸与 OCR 文字框不同。
+                # 用标注时蓝框相对红框的几何关系重建。
+                bl, bt, br, bb = (float(v) for v in step.box)
+                ql, qt, qr, qb = (float(v) for v in step.captcha_box)
+                sx = c.w / max(br - bl, 1.0)
+                sy = c.h / max(bb - bt, 1.0)
+                l = max(0, int(c.box[0] + (ql - bl) * sx))
+                t = max(0, int(c.box[1] + (qt - bt) * sy))
+                r = min(W, int(c.box[0] + (qr - bl) * sx))
+                b = min(H, int(c.box[1] + (qb - bt) * sy))
+            else:
+                rl, rt, rr, rb = step.captcha_ratio
+                l = max(0, int(c.cx + rl * c.w))
+                t = max(0, int(c.cy + rt * c.h))
+                r = min(W, int(c.cx + rr * c.w))
+                b = min(H, int(c.cy + rb * c.h))
+
+            got = (solve_arith(self.vision, current.shot.img[t:b, l:r])
+                   if r > l and b > t else None)
+            if got is not None:
+                answer, expr = got
+                logger.info("验证码 %s → %s", expr, answer)
+                return answer
+
+            if attempt >= _CAPTCHA_MAX_REFRESHES or r <= l or b <= t:
+                break
+
+            refresh_no = attempt + 1
+            refresh_point = ((l + r) // 2, (t + b) // 2)
+            logger.warning("验证码无法解析，点击图片刷新后重试（%d/%d）",
+                           refresh_no, _CAPTCHA_MAX_REFRESHES)
+            self.inputs.click(*self.vision.to_screen(current.shot, refresh_point))
+            time.sleep(_CAPTCHA_REFRESH_DELAY)
+
+            new_shot = self.vision.capture()
+            fresh = None
+            main_loc = step.build_locator()
+            if main_loc is not None:
+                try:
+                    fresh = self.vision.locate(main_loc, new_shot)
+                except Exception:
+                    fresh = None
+            if fresh is not None and fresh.ok and fresh.chosen is not None:
+                current = fresh
+            else:
+                # 刷新通常不改布局；主定位偶发失败时沿用原坐标，只替换新截图。
+                current = LocateResult(
+                    locator=current.locator, ok=True, chosen=current.chosen,
+                    click_point=current.click_point, shot=new_shot,
+                    used_fallback=current.used_fallback,
+                )
+
+        raise StepError(
+            f"验证码连续刷新 {_CAPTCHA_MAX_REFRESHES} 次后仍无法解析，请人工登录",
+            current.shot,
+        )
 
     def _input_step(self, step: Step, loc, timeout: float, ctx: dict) -> None:
         """流程②③④：点击聚焦 → 清空 → 注入 → 回读校验（失败降级剪贴板粘贴）。
