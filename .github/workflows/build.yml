@@ -29,7 +29,25 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller
       - name: Build EXE
-        run: pyinstaller MachineVisionWorkflowAssistant.spec --noconfirm --clean
+        shell: pwsh
+        run: |
+          pyinstaller MachineVisionWorkflowAssistant.spec --noconfirm --clean 2>&1 |
+            Tee-Object -FilePath pyinstaller-windows.log
+          if ($LASTEXITCODE -ne 0) {
+            $tail = (Get-Content pyinstaller-windows.log -Tail 80).ForEach({
+              $_.Replace("%", "%25").Replace("`r", "%0D").Replace("`n", "%0A")
+            }) -join "%0A"
+            Write-Output "::error title=Windows PyInstaller failed::$tail"
+            exit $LASTEXITCODE
+          }
+      - name: Upload Windows build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v5
+        with:
+          name: MachineVisionWorkflowAssistant-windows-build-log
+          path: pyinstaller-windows.log
+          if-no-files-found: ignore
+          retention-days: 7
       - name: Assemble release bundle
         shell: pwsh
         run: |

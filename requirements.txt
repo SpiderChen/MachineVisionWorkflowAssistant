@@ -4,6 +4,9 @@ mss                                  # 快速截屏，多显示器
 opencv-python                        # 模板匹配 / 图像处理
 numpy
 rapidocr-onnxruntime                 # OCR 文字锚点（ONNX，CPU 即可）
+# 1.28.0 发布后 Windows PyInstaller 打包失败；1.27.0 是 GitHub Actions 已验证版本。
+# 显式固定这个原本由 rapidocr 间接安装的依赖，避免无关发版破坏构建。
+onnxruntime==1.27.0
 pynput                               # 非 Windows 开发环境的输入降级后端
 pywin32; sys_platform == "win32"     # 窗口激活 / 剪贴板
 Pillow                               # 托盘图标绘制
