@@ -49,6 +49,13 @@ def _ensure_std_streams() -> None:
                 pass
 
 
+def _ocr_self_test_requested() -> bool:
+    trigger = os.path.join(_base_dir(), ".ocr-self-test")
+    return ("--ocr-self-test" in sys.argv
+            or os.environ.get("MVWA_OCR_SELF_TEST") == "1"
+            or os.path.isfile(trigger))
+
+
 def _finish_frozen_ocr_self_test(exit_code: int) -> int:
     """Windows onefile 自检完成后直接结束子进程。
 
@@ -56,9 +63,8 @@ def _finish_frozen_ocr_self_test(exit_code: int) -> int:
     即使推理和日志都已完成，Actions 的 Start-Process 仍会一直等待。这个特殊退出只用于
     ``--ocr-self-test`` 验收命令；正常托盘/服务模式仍走完整的 Python 清理流程。
     """
-    self_test = ("--ocr-self-test" in sys.argv
-                 or os.environ.get("MVWA_OCR_SELF_TEST") == "1")
-    if sys.platform == "win32" and getattr(sys, "frozen", False) and self_test:
+    if (sys.platform == "win32" and getattr(sys, "frozen", False)
+            and _ocr_self_test_requested()):
         try:
             import logging
 
@@ -76,7 +82,7 @@ def main() -> int:
     try:
         # GitHub Windows Runner 的冻结包验收走专用直达入口，完全绕开普通 GUI/托盘
         # 启动分支。环境变量只由 workflow 临时设置，不影响用户正常启动。
-        if os.environ.get("MVWA_OCR_SELF_TEST") == "1":
+        if _ocr_self_test_requested():
             from app.logger import init_logging
             from app.main import _cli_ocr_self_test
             from app.settings import CONFIG_PATH, Settings

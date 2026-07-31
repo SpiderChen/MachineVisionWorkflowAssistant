@@ -57,7 +57,9 @@ jobs:
           $exe = "dist/MachineVisionWorkflowAssistant/MachineVisionWorkflowAssistant.exe"
           $log = "dist/MachineVisionWorkflowAssistant/logs/app.log"
           $status = "dist/MachineVisionWorkflowAssistant/logs/ocr-self-test.status"
+          $trigger = "dist/MachineVisionWorkflowAssistant/.ocr-self-test"
           Remove-Item $log, $status -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType File -Force -Path $trigger | Out-Null
           $env:MVWA_OCR_SELF_TEST = "1"
           $proc = Start-Process `
             -FilePath $exe `
@@ -89,6 +91,7 @@ jobs:
             if (-not $proc.HasExited) {
               Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
             }
+            Remove-Item $trigger -Force -ErrorAction SilentlyContinue
             Write-Output "Packaged OCR inference passed on Windows ${{ matrix.architecture }}"
             exit 0
           }
@@ -97,9 +100,11 @@ jobs:
             $stages = if (Test-Path $status) {
               (Get-Content $status) -join " -> "
             } else { "no status file" }
+            Remove-Item $trigger -Force -ErrorAction SilentlyContinue
             Write-Output "::error title=Packaged OCR self-test timed out::Last stages: $stages"
             exit 124
           }
+          Remove-Item $trigger -Force -ErrorAction SilentlyContinue
           if ($proc.ExitCode -ne 0) {
             Write-Output "::error title=Packaged OCR self-test failed::Exit code $($proc.ExitCode); see Windows diagnostics artifact"
             exit $proc.ExitCode
