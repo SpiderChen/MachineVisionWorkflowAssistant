@@ -45,6 +45,15 @@ class OcrRuntimeTests(unittest.TestCase):
 
             self.assertTrue(_ocr_self_test_requested())
 
+    def test_self_test_executable_name_requests_self_test(self):
+        with patch("run.sys.argv", ["app.exe"]), \
+                patch("run.sys.executable", "MachineVisionWorkflowAssistant-selftest.exe"), \
+                patch.dict("run.os.environ", {}, clear=True), \
+                patch("run.os.path.isfile", return_value=False):
+            from run import _ocr_self_test_requested
+
+            self.assertTrue(_ocr_self_test_requested())
+
     def test_falls_back_to_rapidocr_v2_only_when_legacy_package_is_absent(self):
         marker = object()
         missing = ModuleNotFoundError(

@@ -51,8 +51,10 @@ def _ensure_std_streams() -> None:
 
 def _ocr_self_test_requested() -> bool:
     trigger = os.path.join(_base_dir(), ".ocr-self-test")
+    executable = os.path.basename(sys.executable).casefold()
     return ("--ocr-self-test" in sys.argv
             or os.environ.get("MVWA_OCR_SELF_TEST") == "1"
+            or executable.endswith("-selftest.exe")
             or os.path.isfile(trigger))
 
 
