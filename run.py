@@ -49,6 +49,24 @@ def _ensure_std_streams() -> None:
                 pass
 
 
+def _finish_frozen_ocr_self_test(exit_code: int) -> int:
+    """Windows onefile 自检完成后直接结束子进程。
+
+    ONNX Runtime 的原生线程在 PyInstaller onefile 子进程解释器清理阶段偶尔不会退出，
+    即使推理和日志都已完成，Actions 的 Start-Process 仍会一直等待。这个特殊退出只用于
+    ``--ocr-self-test`` 验收命令；正常托盘/服务模式仍走完整的 Python 清理流程。
+    """
+    if (sys.platform == "win32" and getattr(sys, "frozen", False)
+            and "--ocr-self-test" in sys.argv):
+        try:
+            import logging
+
+            logging.shutdown()
+        finally:
+            os._exit(int(exit_code or 0))
+    return int(exit_code or 0)
+
+
 def main() -> int:
     _ensure_std_streams()
     sys.excepthook = _report_crash
@@ -57,7 +75,7 @@ def main() -> int:
     try:
         from app.main import main as app_main
 
-        return app_main()
+        return _finish_frozen_ocr_self_test(app_main())
     except SystemExit:
         raise
     except KeyboardInterrupt:
