@@ -114,7 +114,7 @@ if IS_MAC:
         bundle_identifier="com.spiderchen.mvwa",
         info_plist={
             "NSHighResolutionCapable": True,
-            "CFBundleShortVersionString": "0.1.0",
+            "CFBundleShortVersionString": "0.1.1",
             # 截屏 / 输入会在运行时触发 macOS TCC 授权（屏幕录制 / 辅助功能），首次运行
             # 需在「系统设置 → 隐私与安全性」手动放行；不设 LSUIElement，保留 Dock 图标。
         },

@@ -21,7 +21,7 @@ def create_app(engine, settings):
         task_id: Optional[str] = None          # 外部单号（可选）
         callback_url: Optional[str] = None     # 结果回调（可选）
 
-    app = FastAPI(title="AutoPrintDeliveryOrder", version="0.1.0")
+    app = FastAPI(title="AutoPrintDeliveryOrder", version="0.1.1")
 
     def _check_auth(authorization: str | None) -> None:
         token = settings.api.token

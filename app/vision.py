@@ -7,10 +7,12 @@
 """
 from __future__ import annotations
 
+import importlib
 import logging
 import math
 import os
 import re
+import sys
 import threading
 import time
 from hashlib import blake2b
@@ -32,6 +34,82 @@ logger = logging.getLogger(__name__)
 
 class VisionError(Exception):
     pass
+
+
+_DLL_DIR_HANDLES: list[object] = []
+
+
+def _prepare_onnx_dll_search_path() -> None:
+    """让冻结后的 Windows 进程能从 ONNX Runtime 自己的目录加载依赖 DLL。"""
+    if sys.platform != "win32" or not getattr(sys, "frozen", False):
+        return
+    root = getattr(sys, "_MEIPASS", "")
+    capi_dir = os.path.join(root, "onnxruntime", "capi") if root else ""
+    if not capi_dir or not os.path.isdir(capi_dir):
+        return
+    try:
+        # 返回的句柄必须保活，否则目录会立刻从进程 DLL 搜索路径移除。
+        _DLL_DIR_HANDLES.append(os.add_dll_directory(capi_dir))
+    except (AttributeError, FileNotFoundError, OSError):
+        logger.debug("无法追加 ONNX Runtime DLL 搜索目录: %s", capi_dir,
+                     exc_info=True)
+
+
+def _exception_detail(exc: BaseException) -> str:
+    detail = " ".join(str(exc).split()) or type(exc).__name__
+    return detail[:300]
+
+
+def _ocr_load_error(package: str, exc: BaseException) -> VisionError:
+    """把真实依赖/DLL 错误保留下来，避免一律误报为 RapidOCR 未安装。"""
+    detail = _exception_detail(exc)
+    lowered = detail.lower()
+    if sys.platform == "win32" and (
+            "dll" in lowered or "dynamic link library" in lowered):
+        hint = (
+            "ONNX Runtime DLL 加载失败；请安装 Microsoft Visual C++ "
+            "2015-2022 Redistributable (x64)，或使用通过 OCR 自检的 Windows 完整包"
+        )
+    elif isinstance(exc, ModuleNotFoundError) and exc.name:
+        hint = f"{package} 的依赖 {exc.name} 缺失"
+        if not getattr(sys, "frozen", False):
+            hint += "；请重新执行 python -m pip install -r requirements.txt"
+    else:
+        hint = f"{package} 加载失败"
+    return VisionError(f"{hint}（{type(exc).__name__}: {detail}）")
+
+
+def _missing_ocr_error() -> VisionError:
+    if getattr(sys, "frozen", False):
+        return VisionError("Windows 完整包缺少 RapidOCR 组件，请重新下载通过 OCR 自检的构建")
+    return VisionError(
+        "RapidOCR 未安装（python -m pip install "
+        "rapidocr-onnxruntime==1.4.4 onnxruntime==1.20.1）")
+
+
+def _load_rapidocr_class():
+    """优先载入兼容版；仅当整个包不存在时才尝试 RapidOCR v2。"""
+    _prepare_onnx_dll_search_path()
+    try:
+        return importlib.import_module("rapidocr_onnxruntime").RapidOCR
+    except ModuleNotFoundError as exc:
+        if exc.name != "rapidocr_onnxruntime":
+            logger.exception("rapidocr-onnxruntime 的内部依赖加载失败")
+            raise _ocr_load_error("rapidocr-onnxruntime", exc) from exc
+    except (ImportError, OSError, AttributeError) as exc:
+        logger.exception("rapidocr-onnxruntime 加载失败")
+        raise _ocr_load_error("rapidocr-onnxruntime", exc) from exc
+
+    try:
+        return importlib.import_module("rapidocr").RapidOCR
+    except ModuleNotFoundError as exc:
+        if exc.name == "rapidocr":
+            raise _missing_ocr_error() from exc
+        logger.exception("rapidocr 的内部依赖加载失败")
+        raise _ocr_load_error("rapidocr", exc) from exc
+    except (ImportError, OSError, AttributeError) as exc:
+        logger.exception("rapidocr 加载失败")
+        raise _ocr_load_error("rapidocr", exc) from exc
 
 
 def _norm(s: str) -> str:
@@ -204,14 +282,7 @@ class Vision:
 
     def _get_ocr(self):
         if self._ocr_engine is None:
-            try:
-                from rapidocr_onnxruntime import RapidOCR
-            except ImportError:
-                try:
-                    from rapidocr import RapidOCR
-                except ImportError:
-                    raise VisionError(
-                        "RapidOCR 未安装（pip install rapidocr-onnxruntime）")
+            RapidOCR = _load_rapidocr_class()
             cfg = self.settings.engine
             cpu_count = os.cpu_count() or 1
             threads = int(getattr(cfg, "ocr_threads", 0) or 0)
@@ -227,12 +298,18 @@ class Vision:
                         threads, "开" if use_cls else "关")
             t0 = time.time()
             try:
-                self._ocr_engine = RapidOCR(**kwargs)
-            except (TypeError, ValueError, KeyError):
-                # 兼容不接受这些参数的新/旧 RapidOCR 变体。
-                logger.warning("RapidOCR 当前版本不支持性能参数，回退默认初始化",
-                               exc_info=True)
-                self._ocr_engine = RapidOCR()
+                try:
+                    self._ocr_engine = RapidOCR(**kwargs)
+                except (TypeError, ValueError, KeyError):
+                    # 兼容不接受这些参数的新/旧 RapidOCR 变体。
+                    logger.warning("RapidOCR 当前版本不支持性能参数，回退默认初始化",
+                                   exc_info=True)
+                    self._ocr_engine = RapidOCR()
+            except Exception as exc:
+                logger.exception("RapidOCR 初始化失败")
+                raise VisionError(
+                    f"RapidOCR 初始化失败（{type(exc).__name__}: "
+                    f"{_exception_detail(exc)}）") from exc
             logger.info("RapidOCR 初始化完成，耗时 %.2fs", time.time() - t0)
         return self._ocr_engine
 

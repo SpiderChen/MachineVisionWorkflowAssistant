@@ -40,12 +40,29 @@ jobs:
             Write-Output "::error title=Windows PyInstaller failed::$tail"
             exit $LASTEXITCODE
           }
-      - name: Upload Windows build log on failure
+      - name: Verify packaged OCR runtime
+        shell: pwsh
+        run: |
+          $proc = Start-Process `
+            -FilePath "dist/MachineVisionWorkflowAssistant.exe" `
+            -ArgumentList "--ocr-self-test" `
+            -Wait -PassThru
+          if (Test-Path "dist/logs/app.log") {
+            Get-Content "dist/logs/app.log" -Tail 80
+          }
+          if ($proc.ExitCode -ne 0) {
+            Write-Output "::error title=Packaged OCR self-test failed::Exit code $($proc.ExitCode); see Windows diagnostics artifact"
+            exit $proc.ExitCode
+          }
+      - name: Upload Windows diagnostics on failure
         if: failure()
         uses: actions/upload-artifact@v5
         with:
-          name: MachineVisionWorkflowAssistant-windows-build-log
-          path: pyinstaller-windows.log
+          name: MachineVisionWorkflowAssistant-windows-diagnostics
+          path: |
+            pyinstaller-windows.log
+            dist/logs/app.log
+            dist/startup_error.log
           if-no-files-found: ignore
           retention-days: 7
       - name: Assemble release bundle

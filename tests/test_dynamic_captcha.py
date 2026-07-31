@@ -4,7 +4,7 @@ from unittest.mock import patch
 
 import numpy as np
 
-from app.captcha import parse_arith, solve_arith
+from app.captcha import parse_alnum, parse_arith, solve_alnum, solve_arith
 from app.engine import Engine, StepError
 from app.flows import (
     Step, StepLocator, derive_dynamic_arith_locator, relative_box_ratio,
@@ -57,6 +57,33 @@ class DynamicCaptchaTests(unittest.TestCase):
         self.assertEqual(solve_arith(vision, img), ("12", "6*2"))
         self.assertEqual(vision.calls, 2)
 
+    def test_parse_alnum_normalizes_fullwidth_and_preserves_case(self):
+        self.assertEqual(parse_alnum("Ａ b-3 ７"), "Ab37")
+        self.assertEqual(parse_alnum("xY9"), "xY9")
+        self.assertIsNone(parse_alnum("A7"))
+        self.assertIsNone(parse_alnum("ABCDEFGHI"))
+
+    def test_alnum_solver_reorders_split_candidates_before_accepting_fragment(self):
+        class _CaptchaVision:
+            def ocr_image(self, image):
+                return [
+                    Candidate(box=(55, 0, 90, 20), text="7dK", score=0.95),
+                    Candidate(box=(5, 0, 40, 20), text="aB", score=0.96),
+                ]
+
+        img = np.full((30, 100, 3), 255, dtype=np.uint8)
+
+        self.assertEqual(solve_alnum(_CaptchaVision(), img), ("aB7dK", "aB7dK"))
+
+    def test_alnum_solver_rejects_low_confidence_guess(self):
+        class _CaptchaVision:
+            def ocr_image(self, image):
+                return [Candidate(box=(5, 0, 90, 20), text="aB7d", score=0.2)]
+
+        img = np.full((30, 100, 3), 255, dtype=np.uint8)
+
+        self.assertIsNone(solve_alnum(_CaptchaVision(), img))
+
     def test_arith_match_accepts_changed_question(self):
         loc = TextLocator(anchor="0*9=?", match=Match.ARITH)
 
@@ -83,6 +110,15 @@ class DynamicCaptchaTests(unittest.TestCase):
         self.assertEqual(restored.locator.anchor, "用户名")
         self.assertEqual(restored.captcha_locator.anchor, "0*9=?")
         self.assertEqual(restored.captcha_locator.match, "arith")
+
+    def test_captcha_mode_roundtrips_and_old_config_defaults_to_arith(self):
+        alnum = Step(action="input", value_source="captcha", captcha_mode="alnum")
+
+        restored = Step.from_dict(alnum.to_dict())
+        legacy = Step.from_dict({"action": "input", "value_source": "captcha"})
+
+        self.assertEqual(restored.captcha_mode, "alnum")
+        self.assertEqual(legacy.captcha_mode, "arith")
 
     def test_old_exact_captcha_anchor_is_migrated(self):
         step = Step.from_dict({
@@ -173,6 +209,32 @@ class DynamicCaptchaTests(unittest.TestCase):
 
         with patch("app.captcha.solve_arith", side_effect=_solve):
             self.assertEqual(engine._solve_captcha(step, input_res), "12")
+
+    def test_engine_uses_alnum_solver_and_ignores_arith_dynamic_anchor(self):
+        engine = Engine.__new__(Engine)
+        shot_img = np.zeros((300, 500, 3), dtype=np.uint8)
+        shot_img[100:140, 320:380] = 255
+        shot = Screenshot(img=shot_img)
+        input_res = LocateResult(
+            locator=TextLocator(anchor="验证码", match=Match.EXACT), ok=True,
+            chosen=Candidate(box=(100, 100, 300, 140), text="", score=0.99),
+            click_point=(200, 120), shot=shot,
+        )
+        step = Step(
+            action="input", value_source="captcha", captcha_mode="alnum",
+            locator=StepLocator(kind="text", anchor="验证码", match="exact"),
+            captcha_locator=StepLocator(kind="text", anchor="0*9=?", match="arith"),
+            captcha_ratio=[0.6, -0.5, 0.9, 0.5],
+        )
+        engine.vision = type("V", (), {})()
+
+        with patch("app.captcha.solve_alnum",
+                   return_value=("aB7d", "aB7d")) as solve_alnum_mock, \
+                patch("app.captcha.solve_arith") as solve_arith_mock:
+            self.assertEqual(engine._solve_captcha(step, input_res), "aB7d")
+
+        solve_alnum_mock.assert_called_once()
+        solve_arith_mock.assert_not_called()
 
     def test_engine_clicks_captcha_to_refresh_and_retries(self):
         engine = Engine.__new__(Engine)

@@ -5,6 +5,7 @@
   python -m app.main --headless          # 无 UI 运行（仅触发源 + 引擎）
   python -m app.main --print A0231       # M1 验证：命令行一单，同步执行“定位→输入→点打印”
   python -m app.main --locate all        # 定位诊断：命令行版「测试定位」，标注图存 logs/
+  python -m app.main --ocr-self-test     # 打包验收：初始化模型并执行一次空白图 OCR
 """
 from __future__ import annotations
 
@@ -81,6 +82,22 @@ def _cli_locate(vision, which: str) -> int:
     out = LOGS_DIR / f"diag_{which}.png"
     cv2.imwrite(str(out), annotated)
     print(f"标注截图: {out}")
+    return 0
+
+
+def _cli_ocr_self_test(settings) -> int:
+    """初始化模型并实际推理一次，供 Windows 打包流水线拦截残缺成品。"""
+    import numpy as np
+
+    from .vision import Vision
+
+    try:
+        blank = np.full((64, 256, 3), 255, dtype=np.uint8)
+        Vision(settings).ocr_image(blank)
+    except Exception:
+        logger.exception("OCR 自检失败")
+        return 2
+    logger.info("OCR 自检通过")
     return 0
 
 
@@ -230,6 +247,8 @@ def main() -> int:
     parser.add_argument("--headless", action="store_true", help="无托盘/无配置窗口运行")
     parser.add_argument("--ui", action="store_true",
                         help="无托盘完整模式：配置窗口 + 引擎 + DB 轮询 + HTTP API")
+    parser.add_argument("--ocr-self-test", action="store_true",
+                        help="初始化 RapidOCR 并执行一次推理后退出")
     args = parser.parse_args()
 
     from .logger import init_logging
@@ -238,6 +257,9 @@ def main() -> int:
     settings = Settings.load(args.config or CONFIG_PATH)
     init_logging(settings.log.level)
     logger.info("AutoPrintDeliveryOrder 启动（配置: %s）", settings.path)
+
+    if args.ocr_self_test:
+        return _cli_ocr_self_test(settings)
 
     vision, inputs, engine = _build_core(settings)
 

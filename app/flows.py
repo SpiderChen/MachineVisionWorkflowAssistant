@@ -41,7 +41,8 @@ ACTION_LABELS = {
 # 需要框选目标的动作（key/sleep 无目标）
 LOCATOR_ACTIONS = ("click", "double_click", "right_click", "input", "wait")
 VALUE_SOURCES = {"vehicle_no": "车辆自编号", "username": "用户名",
-                 "password": "密码", "captcha": "验证码(计算题)", "fixed": "固定文本"}
+                 "password": "密码", "captcha": "图片验证码", "fixed": "固定文本"}
+CAPTCHA_MODES = {"arith": "算术题", "alnum": "英文字母/数字"}
 KEY_CHOICES = ("enter", "tab", "esc", "f5", "delete", "backspace", "home", "end")
 
 
@@ -129,12 +130,13 @@ class Step:
     name: str = ""                          # 空则由 label() 自动生成
     ref: str = ""                           # 引用 locators.ALL 注册元素（内置流程）
     locator: StepLocator | None = None      # 框选推导的定位（与 ref 二选一）
-    captcha_locator: StepLocator | None = None  # 验证码图片上的算式锚点（仅 input/captcha）
+    captcha_locator: StepLocator | None = None  # 算术验证码图片上的动态算式锚点
     # input 专用
     value_source: str = "fixed"             # fixed / vehicle_no / username / password
     text: str = ""                          # value_source=fixed 时的文本
     clear_first: bool = True                # 输入前 Ctrl+A + Delete 清空
     verify: bool = True                     # OCR 回读校验（password 强制跳过）
+    captcha_mode: str = "arith"             # value_source=captcha: arith / alnum
     # key / sleep / wait 专用
     key: str = "enter"
     seconds: float = 1.0
@@ -202,13 +204,16 @@ class Step:
             d["ref"] = self.ref
         if self.locator is not None:
             d["locator"] = self.locator.to_dict()
-        if self.captcha_locator is not None:
+        if (self.captcha_locator is not None and self.value_source == "captcha"
+                and self.captcha_mode == "arith"):
             d["captcha_locator"] = self.captcha_locator.to_dict()
         if self.action == "input":
             d.update(value_source=self.value_source, clear_first=self.clear_first,
                      verify=self.verify)
             if self.value_source == "fixed":
                 d["text"] = self.text
+            if self.value_source == "captcha":
+                d["captcha_mode"] = self.captcha_mode
             if self.captcha_box:
                 d["captcha_box"] = [int(v) for v in self.captcha_box]
             if self.captcha_ratio:
@@ -240,6 +245,8 @@ class Step:
             value_source=d.get("value_source", "fixed"), text=d.get("text", ""),
             clear_first=bool(d.get("clear_first", True)),
             verify=bool(d.get("verify", True)),
+            captcha_mode=(d.get("captcha_mode", "arith")
+                          if d.get("captcha_mode", "arith") in CAPTCHA_MODES else "arith"),
             key=d.get("key", "enter"), seconds=float(d.get("seconds", 1.0)),
             timeout=float(d.get("timeout", 0.0)),
             optional=bool(d.get("optional", False)),
@@ -252,11 +259,14 @@ class Step:
         # 旧版会把标注当时的具体题目（如 0*9=?）保存为 EXACT。
         # 加载旧 flows.yaml 时自动升级为动态算式匹配，无需用户删除重配。
         if (step.action == "input" and step.value_source == "captcha"
+                and step.captcha_mode == "arith"
                 and step.locator is not None and step.locator.kind == "text"
                 and step.locator.match == "exact"):
             from .captcha import parse_arith
             if parse_arith(step.locator.anchor) is not None:
                 step.locator.match = "arith"
+        if step.captcha_mode != "arith":
+            step.captcha_locator = None
         return step
 
 
@@ -293,11 +303,12 @@ def default_flows() -> dict[str, Flow]:
              verify=False, name="输入用户名"),
         Step(action="input", ref="PASSWORD_INPUT", value_source="password",
              verify=False, name="输入密码"),
-        # 算术验证码（1+1=? 图片）：optional——没有验证码的站点自动跳过；
+        # 图片验证码：默认算术模式，也可在流程编排页改为英文字母/数字；
+        # optional——没有验证码的站点自动跳过；
         # 图片区域需在流程编排页框选一次（相对输入框比例，跨分辨率）
         Step(action="input", ref="CAPTCHA_INPUT", value_source="captcha",
              verify=False, optional=True, timeout=3.0,
-             name="识别并输入算术验证码（如无验证码自动跳过）"),
+             name="识别并输入图片验证码（如无验证码自动跳过）"),
         Step(action="click", ref="LOGIN_BUTTON", name="点击登录按钮"),
     ])
     return {f.key: f for f in (print_order, login)}

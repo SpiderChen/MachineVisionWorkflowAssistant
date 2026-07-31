@@ -474,8 +474,15 @@ class Engine:
         raise StepError(f"未知输入值来源: {src}")
 
     def _solve_captcha(self, step: Step, res: LocateResult | None) -> str:
-        """识别算术验证码；模糊时点击验证码图片刷新并自动重试。"""
-        from .captcha import parse_arith, solve_arith
+        """识别所选类型的图片验证码；模糊时刷新并自动重试。"""
+        from .captcha import parse_arith, solve_alnum, solve_arith
+
+        mode = getattr(step, "captcha_mode", "arith")
+        if mode not in ("arith", "alnum"):
+            raise StepError(f"不支持的验证码类型: {mode}")
+        is_arith = mode == "arith"
+        solver = solve_arith if is_arith else solve_alnum
+        kind_label = "算术验证码" if is_arith else "字母数字验证码"
 
         if res is None or res.chosen is None or res.shot is None:
             raise StepError("验证码步骤需要框选定位目标（输入框），无法计算图片区域")
@@ -483,7 +490,7 @@ class Engine:
 
         for attempt in range(_CAPTCHA_MAX_REFRESHES + 1):
             c = current.chosen
-            captcha_loc = step.captcha_locator
+            captcha_loc = step.captcha_locator if is_arith else None
 
             # 动态算式锚点优先直接读取当前题目；主定位仍只负责答案输入框。
             if captcha_loc is not None and not current.used_fallback:
@@ -518,11 +525,14 @@ class Engine:
                 r = min(W, int(c.cx + rr * c.w))
                 b = min(H, int(c.cy + rb * c.h))
 
-            got = (solve_arith(self.vision, current.shot.img[t:b, l:r])
+            got = (solver(self.vision, current.shot.img[t:b, l:r])
                    if r > l and b > t else None)
             if got is not None:
-                answer, expr = got
-                logger.info("验证码 %s → %s", expr, answer)
+                answer, recognized = got
+                if is_arith:
+                    logger.info("验证码 %s → %s", recognized, answer)
+                else:
+                    logger.info("%s识别为 %r → 自动输入", kind_label, answer)
                 return answer
 
             if attempt >= _CAPTCHA_MAX_REFRESHES or r <= l or b <= t:
@@ -554,7 +564,7 @@ class Engine:
                 )
 
         raise StepError(
-            f"验证码连续刷新 {_CAPTCHA_MAX_REFRESHES} 次后仍无法解析，请人工登录",
+            f"{kind_label}连续刷新 {_CAPTCHA_MAX_REFRESHES} 次后仍无法解析，请人工登录",
             current.shot,
         )
 

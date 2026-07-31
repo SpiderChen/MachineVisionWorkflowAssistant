@@ -1,13 +1,14 @@
-"""算术验证码识别：图片型「1+1=?」类计算题（README §5）。
+"""图片验证码识别：算术题与英文字母/数字验证码（README §5）。
 
 针对小字、浅色背景和散点干扰，OCR 前会自适应放大、留白、去噪并生成多个
-二值化变体；同时容错常见的数字/算符误识别和 OCR 片段乱序。识别失败
-返回 None，由引擎刷新验证码后重试。
+二值化变体；同时容错 OCR 片段乱序。算术模式还会修正常见的数字/算符
+误识别。识别失败返回 None，由引擎刷新验证码后重试。
 """
 from __future__ import annotations
 
 import logging
 import re
+import unicodedata
 
 import cv2
 
@@ -25,6 +26,8 @@ _DIGIT_CONFUSIONS = str.maketrans({
     "I": "1", "l": "1", "|": "1", "!": "1",
     "Z": "2", "z": "2", "S": "5", "s": "5", "B": "8",
 })
+_ALNUM_MIN_LENGTH = 3
+_ALNUM_MAX_LENGTH = 8
 
 
 def parse_arith(text: str) -> tuple[str, str] | None:
@@ -47,6 +50,20 @@ def parse_arith(text: str) -> tuple[str, str] | None:
             return None
         v = a // b
     return str(v), f"{a}{op}{b}"
+
+
+def parse_alnum(text: str, *, min_length: int = _ALNUM_MIN_LENGTH,
+                max_length: int = _ALNUM_MAX_LENGTH) -> str | None:
+    """提取英文字母/数字验证码，保留 OCR 识别出的大小写。
+
+    全角字符先转为半角，再忽略空格与干扰符号。默认只接受 3~8 位，避免把
+    裁剪区域边缘的标签或单个噪点误当成验证码。
+    """
+    if min_length < 1 or max_length < min_length:
+        raise ValueError("验证码长度范围无效")
+    normalized = unicodedata.normalize("NFKC", text or "")
+    code = "".join(re.findall(r"[A-Za-z0-9]", normalized))
+    return code if min_length <= len(code) <= max_length else None
 
 
 def _remove_speckles(binary: cv2.typing.MatLike) -> cv2.typing.MatLike:
@@ -99,16 +116,22 @@ def _ocr_variants(img_bgr):
     )
 
 
-def _candidate_texts(cands, min_score: float):
+def _candidate_texts(cands, min_score: float, *, combined_first: bool = False):
     """同时尝试单个 OCR 结果和按横坐标重组的整行结果。"""
     eligible = [c for c in cands if c.score >= min_score and (c.text or "").strip()]
     if not eligible:
         return
+    ordered = sorted(eligible, key=lambda c: (c.cx, c.cy))
+    combined = (
+        "".join(c.text or "" for c in ordered),
+        " ".join(c.text or "" for c in ordered),
+    )
+    if combined_first and len(eligible) > 1:
+        yield from combined
     for candidate in sorted(eligible, key=lambda c: c.score, reverse=True):
         yield candidate.text or ""
-    ordered = sorted(eligible, key=lambda c: (c.cx, c.cy))
-    yield "".join(c.text or "" for c in ordered)
-    yield " ".join(c.text or "" for c in ordered)
+    if not combined_first or len(eligible) <= 1:
+        yield from combined
 
 
 def solve_arith(vision, img_bgr) -> tuple[str, str] | None:
@@ -130,4 +153,29 @@ def solve_arith(vision, img_bgr) -> tuple[str, str] | None:
                                 text, got[1], got[0])
                     return got
     logger.warning("验证码无法解析为算术题")
+    return None
+
+
+def solve_alnum(vision, img_bgr) -> tuple[str, str] | None:
+    """识别 3~8 位英文字母/数字验证码。
+
+    成功返回 ``(待输入字符, OCR 原文)``，无法可靠提取时返回 None。多个 OCR
+    片段优先按屏幕横坐标拼接，避免只输入验证码的一部分。
+    """
+    if img_bgr is None or img_bgr.size == 0:
+        return None
+    for variant in _ocr_variants(img_bgr):
+        try:
+            cands = vision.ocr_image(variant)
+        except Exception as e:
+            logger.warning("验证码 OCR 失败: %s", e)
+            continue
+        # 字母数字没有“算式可计算”这种语义校验，低置信度结果宁可刷新也不误填。
+        for min_score in (0.75, 0.50):
+            for text in _candidate_texts(cands, min_score, combined_first=True):
+                code = parse_alnum(text)
+                if code is not None:
+                    logger.info("字母数字验证码识别: %r → %s", text, code)
+                    return code, (text or "").strip()
+    logger.warning("验证码无法解析为 3~8 位英文字母/数字")
     return None

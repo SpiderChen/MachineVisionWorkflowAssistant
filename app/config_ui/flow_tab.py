@@ -24,7 +24,7 @@ from ..qt_compat import (
 )
 
 from ..flows import (
-    ACTION_LABELS, KEY_CHOICES, LOCATOR_ACTIONS, SHOTS_DIR, VALUE_SOURCES,
+    ACTION_LABELS, CAPTCHA_MODES, KEY_CHOICES, LOCATOR_ACTIONS, SHOTS_DIR, VALUE_SOURCES,
     FlowError, Step, derive_dynamic_arith_locator, derive_locator,
     relative_box_ratio,
 )
@@ -287,6 +287,10 @@ class FlowTab(QWidget):
         for s in _SOURCE_ORDER:
             self.cmb_source.addItem(VALUE_SOURCES[s], s)
         self.cmb_source.currentIndexChanged.connect(self._on_prop_changed)
+        self.cmb_captcha_mode = QComboBox()
+        for mode, label in CAPTCHA_MODES.items():
+            self.cmb_captcha_mode.addItem(label, mode)
+        self.cmb_captcha_mode.currentIndexChanged.connect(self._on_prop_changed)
         self.le_fixed = QLineEdit()
         self.le_fixed.setPlaceholderText("固定文本内容")
         self.le_fixed.editingFinished.connect(self._on_prop_changed)
@@ -297,6 +301,7 @@ class FlowTab(QWidget):
         self.btn_captcha = QPushButton("🖼 框选验证码图片区域")
         self.btn_captcha.clicked.connect(self._start_captcha_box)
         form.addRow("输入内容", self.cmb_source)
+        form.addRow("验证码类型", self.cmb_captcha_mode)
         form.addRow("", self.le_fixed)
         form.addRow("", self.chk_clear)
         form.addRow("", self.chk_verify)
@@ -390,6 +395,8 @@ class FlowTab(QWidget):
         self._loading = True
         self.cmb_action.setCurrentIndex(max(self.cmb_action.findData(s.action), 0))
         self.cmb_source.setCurrentIndex(max(self.cmb_source.findData(s.value_source), 0))
+        self.cmb_captcha_mode.setCurrentIndex(
+            max(self.cmb_captcha_mode.findData(s.captcha_mode), 0))
         self.le_fixed.setText(s.text)
         self.chk_clear.setChecked(s.clear_first)
         self.chk_verify.setChecked(s.verify)
@@ -407,15 +414,17 @@ class FlowTab(QWidget):
         for w in (self.cmb_source, self.le_fixed, self.chk_clear, self.chk_verify):
             w.setVisible(is_input)
         self.le_fixed.setEnabled(self.cmb_source.currentData() == "fixed")
-        self.btn_captcha.setVisible(
-            is_input and self.cmb_source.currentData() == "captcha")
+        is_captcha = is_input and self.cmb_source.currentData() == "captcha"
+        self.cmb_captcha_mode.setVisible(is_captcha)
+        self.btn_captcha.setVisible(is_captcha)
         self.cmb_key.setVisible(a == "key")
         self.sb_seconds.setVisible(a == "sleep")
         has_target = a in LOCATOR_ACTIONS
         self.chk_optional.setVisible(has_target)
         self.sb_timeout.setVisible(has_target)
         # QFormLayout 的行标签不随字段自动隐藏，需手动同步
-        for w in (self.cmb_source, self.cmb_key, self.sb_seconds, self.sb_timeout):
+        for w in (self.cmb_source, self.cmb_captcha_mode, self.cmb_key,
+                  self.sb_seconds, self.sb_timeout):
             lbl = self.form.labelForField(w)
             if lbl is not None:
                 lbl.setVisible(w.isVisibleTo(self))
@@ -435,13 +444,15 @@ class FlowTab(QWidget):
                     lines.append("已限定搜索区域消歧")
                 if sl.template:
                     lines.append("失败自动降级图像模板")
-                if s.value_source == "captcha" and s.captcha_locator is not None:
+                if (s.value_source == "captcha" and s.captcha_mode == "arith"
+                        and s.captcha_locator is not None):
                     lines.append("验证码题目动态锚点")
                 return "；".join(lines)
             return "图像模板匹配定位（T2）"
         if s.ref:
             msg = f"使用内置注册元素 {s.ref} 定位；在此页重新框选可覆盖为本机标注"
-            if s.value_source == "captcha" and s.captcha_locator is not None:
+            if (s.value_source == "captcha" and s.captcha_mode == "arith"
+                    and s.captcha_locator is not None):
                 msg += "；验证码题目动态锚点"
             return msg
         return "⚠ 尚未框选目标：请截屏后在图上拖框"
@@ -581,14 +592,18 @@ class FlowTab(QWidget):
 
     def _annotate_captcha(self, box) -> None:
         """验证码图片区域：换算为相对目标命中框的比例存储，并当场试识别一次。"""
-        from ..captcha import solve_arith
+        from ..captcha import solve_alnum, solve_arith
 
         s = self.step
         shot = self._shot
+        captcha_mode = s.captcha_mode
+        is_arith = captcha_mode == "arith"
+        solver = solve_arith if is_arith else solve_alnum
+        mode_label = CAPTCHA_MODES.get(captcha_mode, captcha_mode)
 
         # 先立即回显用户框选的蓝框，避免后台 OCR 还没跑完时看起来“没有反应”。
         self.canvas.set_annotation(s.box, s.click, box)
-        self.lbl_hint.setText("验证码区域已框选，正在识别算术题…")
+        self.lbl_hint.setText(f"验证码区域已框选，正在识别{mode_label}…")
 
         def _work():
             loc = s.build_locator()
@@ -598,10 +613,10 @@ class FlowTab(QWidget):
                     "目标输入框在当前截图上未定位成功，请先框选/修正目标输入框")
             c = res.chosen
             l, t, r, b = box
-            got = solve_arith(self.vision, shot.img[t:b, l:r])
-            dynamic = derive_dynamic_arith_locator(
+            got = solver(self.vision, shot.img[t:b, l:r])
+            dynamic = (derive_dynamic_arith_locator(
                 self.vision, shot, box, res.click_point or s.click or (c.cx, c.cy),
-                s.locator)
+                s.locator) if is_arith else None)
             # captcha_ratio 的运行时参照始终是主定位命中的答案输入框。
             # 动态算式锚点只负责直接识别；它失效时仍应从答案框推导蓝框位置。
             ratio = relative_box_ratio((l, t, r, b), c)
@@ -609,19 +624,24 @@ class FlowTab(QWidget):
 
         def _done(result):
             ratio, got, dynamic_locator = result
-            if dynamic_locator is not None:
-                s.captcha_locator = dynamic_locator
+            # 字母数字内容每次都会变化，不能把标注当次文本保存成固定锚点。
+            s.captcha_locator = dynamic_locator if is_arith else None
             s.captcha_box = [int(v) for v in box]
             s.captcha_ratio = ratio
             self.canvas.set_annotation(s.box, s.click, s.captcha_box)
             if self.flow is not None and s in self.flow.steps:
                 row = self.flow.steps.index(s)
                 self._refresh_steps(keep_row=row)
-            extra = (f"试识别：{got[1]} = {got[0]} ✔" if got
-                     else "⚠ 试识别失败：当前图上未解析出算术题（真实页面上再测）")
-            mode = ("已启用动态算式锚点（题目变化无需重新标注）"
-                    if dynamic_locator is not None
-                    else "⚠ 未找到完整算式锚点，仍使用原定位方式")
+            if is_arith:
+                extra = (f"试识别：{got[1]} = {got[0]} ✔" if got else
+                         "⚠ 试识别失败：当前图上未解析出算术题（真实页面上再测）")
+                mode = ("已启用动态算式锚点（题目变化无需重新标注）"
+                        if dynamic_locator is not None
+                        else "⚠ 未找到完整算式锚点，仍使用框选区域识别")
+            else:
+                extra = (f"试识别：{got[0]} ✔（保留大小写）" if got else
+                         "⚠ 试识别失败：当前图上未解析出 3~8 位字母数字（真实页面上再测）")
+                mode = "字母数字模式使用蓝色框选区域 OCR（内容变化无需重新标注）"
             report = self._locator_summary(s).rstrip()
             self._reports[s.id] = (
                 f"{report}\n{mode}\n验证码图片区域已记录\n{extra}")
@@ -639,8 +659,11 @@ class FlowTab(QWidget):
         if self._loading or self.step is None:
             return
         s = self.step
+        old_source = s.value_source
+        old_captcha_mode = s.captcha_mode
         s.action = self.cmb_action.currentData() or s.action
         s.value_source = self.cmb_source.currentData() or s.value_source
+        s.captcha_mode = self.cmb_captcha_mode.currentData() or s.captcha_mode
         s.text = self.le_fixed.text()
         s.clear_first = self.chk_clear.isChecked()
         s.verify = self.chk_verify.isChecked()
@@ -648,6 +671,13 @@ class FlowTab(QWidget):
         s.seconds = self.sb_seconds.value()
         s.optional = self.chk_optional.isChecked()
         s.timeout = self.sb_timeout.value()
+        if s.captcha_mode != "arith":
+            s.captcha_locator = None
+        if old_source != s.value_source or old_captcha_mode != s.captcha_mode:
+            self._reports.pop(s.id, None)
+            if s.name == "识别并输入算术验证码（如无验证码自动跳过）":
+                s.name = "识别并输入图片验证码（如无验证码自动跳过）"
+            self.txt_report.setPlainText(self._locator_summary(s))
         if not s.ref:
             s.name = ""                            # 非内置步骤：名称随属性自动更新
         self._update_prop_visibility()
