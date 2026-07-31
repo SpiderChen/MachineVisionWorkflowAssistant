@@ -74,6 +74,17 @@ def main() -> int:
     # macOS 从 Finder 启动 .app 时，旧系统会塞入 -psn_xxx 参数，argparse 不认会直接退出
     sys.argv = [a for a in sys.argv if not a.startswith("-psn_")]
     try:
+        # GitHub Windows Runner 的冻结包验收走专用直达入口，完全绕开普通 GUI/托盘
+        # 启动分支。环境变量只由 workflow 临时设置，不影响用户正常启动。
+        if os.environ.get("MVWA_OCR_SELF_TEST") == "1":
+            from app.logger import init_logging
+            from app.main import _cli_ocr_self_test
+            from app.settings import CONFIG_PATH, Settings
+
+            settings = Settings.load(CONFIG_PATH)
+            init_logging(settings.log.level)
+            return _finish_frozen_ocr_self_test(_cli_ocr_self_test(settings))
+
         from app.main import main as app_main
 
         return _finish_frozen_ocr_self_test(app_main())
