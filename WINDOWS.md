@@ -8,7 +8,8 @@
 - Windows on ARM：优先尝试 x86 包，通过 Windows 自带的 x86 兼容层运行。
 
 ZIP 中已包含 EXE、默认配置、示例和说明，不需要安装 Python。请先完整解压到普通可写
-目录，再运行 `MachineVisionWorkflowAssistant.exe`；不要直接在压缩包内双击运行。
+目录，再运行 `MachineVisionWorkflowAssistant.exe`；不要直接在压缩包内双击运行，也不要
+把 EXE 单独移出目录（同目录的 `_internal` 原生运行库必须保留）。
 
 ## 支持边界
 

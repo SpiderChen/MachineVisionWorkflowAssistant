@@ -52,10 +52,11 @@ jobs:
       - name: Verify packaged OCR runtime
         shell: pwsh
         run: |
-          $log = "dist/logs/app.log"
+          $exe = "dist/MachineVisionWorkflowAssistant/MachineVisionWorkflowAssistant.exe"
+          $log = "dist/MachineVisionWorkflowAssistant/logs/app.log"
           Remove-Item $log -Force -ErrorAction SilentlyContinue
           $proc = Start-Process `
-            -FilePath "dist/MachineVisionWorkflowAssistant.exe" `
+            -FilePath $exe `
             -ArgumentList "--ocr-self-test" `
             -PassThru
 
@@ -107,8 +108,8 @@ jobs:
           name: MachineVisionWorkflowAssistant-windows-${{ matrix.architecture }}-diagnostics
           path: |
             pyinstaller-windows.log
-            dist/logs/app.log
-            dist/startup_error.log
+            dist/MachineVisionWorkflowAssistant/logs/app.log
+            dist/MachineVisionWorkflowAssistant/startup_error.log
           if-no-files-found: ignore
           retention-days: 7
       - name: Assemble release bundle
@@ -116,19 +117,12 @@ jobs:
         run: |
           $rel = "release/MachineVisionWorkflowAssistant"
           New-Item -ItemType Directory -Force -Path $rel | Out-Null
-          Copy-Item dist/MachineVisionWorkflowAssistant.exe $rel/
+          Copy-Item -Recurse "dist/MachineVisionWorkflowAssistant/*" $rel/
           Copy-Item config.yaml $rel/
           Copy-Item README.md $rel/
           Copy-Item WINDOWS.md $rel/
           Copy-Item -Recurse samples $rel/samples
-          Copy-Item dist/MachineVisionWorkflowAssistant.exe "release/MachineVisionWorkflowAssistant-windows-${{ matrix.architecture }}.exe"
           Compress-Archive -Path "$rel/*" -DestinationPath "release/MachineVisionWorkflowAssistant-windows-${{ matrix.architecture }}.zip" -Force
-      - name: Upload EXE artifact
-        uses: actions/upload-artifact@v5
-        with:
-          name: MachineVisionWorkflowAssistant-windows-${{ matrix.architecture }}-exe
-          path: release/MachineVisionWorkflowAssistant-windows-${{ matrix.architecture }}.exe
-          if-no-files-found: error
       - name: Upload Windows bundle
         uses: actions/upload-artifact@v5
         with:

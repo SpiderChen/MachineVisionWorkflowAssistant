@@ -2,7 +2,7 @@
 """PyInstaller 打包规格：机器视觉工作流助手（跨平台）。
 
 在 GitHub Actions 上构建：
-  - Windows（windows-latest）      → 单文件 MachineVisionWorkflowAssistant.exe
+  - Windows（windows-2022）        → 目录式便携包（EXE + 原生 OCR/Qt DLL）
   - macOS（macos-13 / macos-14）   → MachineVisionWorkflowAssistant.app（onedir 包）
 
 本机（Linux）无法实测产物运行时行为，故对易漏依赖一律从宽收集，宁多勿缺：
@@ -120,14 +120,13 @@ if IS_MAC:
         },
     )
 else:
-    # Windows：单文件 exe，崩溃由 run.py 兜底记录并弹窗
+    # Windows：onedir 比 onefile 更适合 ONNX/Qt 的大量原生 DLL。避免每次启动临时解包，
+    # 也规避旧版 Windows Server 上原生运行库从 _MEI 目录加载/清理时卡死。
     exe = EXE(
         pyz,
         a.scripts,
-        a.binaries,
-        a.zipfiles,
-        a.datas,
         [],
+        exclude_binaries=True,
         name="MachineVisionWorkflowAssistant",
         debug=False,
         bootloader_ignore_signals=False,
@@ -141,4 +140,14 @@ else:
         target_arch=None,
         codesign_identity=None,
         entitlements_file=None,
+    )
+    coll = COLLECT(
+        exe,
+        a.binaries,
+        a.zipfiles,
+        a.datas,
+        strip=False,
+        upx=False,
+        upx_exclude=[],
+        name="MachineVisionWorkflowAssistant",
     )

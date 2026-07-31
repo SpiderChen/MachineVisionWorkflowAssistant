@@ -69,7 +69,7 @@ Windows Python/Git Bash 环境运行程序。
 | API 触发 | `FastAPI` + `uvicorn` | 提供 `POST /print` 接口 |
 | DB 触发 | 轮询待打印表（推荐）或 CDC | 见 §4 |
 | DB 访问 | SQLAlchemy Core + `pyodbc` | SQL Server 主力，一套代码兼容 MySQL/PG/Oracle |
-| 打包 | `PyInstaller` | 打成单个 exe，开机自启放启动项 |
+| 打包 | `PyInstaller` | 打成 ZIP 便携目录，解压后双击 exe，开机自启放启动项 |
 
 GitHub Release 提供无需安装 Python 的 Windows 便携包：普通电脑和服务器优先下载
 `MachineVisionWorkflowAssistant-windows-x64.zip`；只有 32 位 Windows 才使用
