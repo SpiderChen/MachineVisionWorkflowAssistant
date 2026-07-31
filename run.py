@@ -85,12 +85,12 @@ def main() -> int:
         # GitHub Windows Runner 的冻结包验收走专用直达入口，完全绕开普通 GUI/托盘
         # 启动分支。环境变量只由 workflow 临时设置，不影响用户正常启动。
         if _ocr_self_test_requested():
-            from app.logger import init_logging
             from app.main import _cli_ocr_self_test
             from app.settings import CONFIG_PATH, Settings
 
             settings = Settings.load(CONFIG_PATH)
-            init_logging(settings.log.level)
+            # 自检状态写独立哨兵；不要初始化 RotatingFileHandler。冻结的 Windows GUI
+            # 进程在 Runner 中连续写文件日志曾发生锁等待，不能让诊断设施阻塞验收本身。
             return _finish_frozen_ocr_self_test(_cli_ocr_self_test(settings))
 
         from app.main import main as app_main

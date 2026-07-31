@@ -98,25 +98,22 @@ def _cli_ocr_self_test(settings) -> int:
             f.write(stage + "\n")
 
     mark("entered")
-    logger.info("OCR 自检阶段 1/3：加载 NumPy")
+    mark("numpy-import-started")
     import numpy as np
 
     mark("numpy-loaded")
-    logger.info("OCR 自检阶段 2/3：加载视觉与 ONNX 模块")
+    mark("vision-import-started")
     from .vision import Vision
 
     mark("vision-loaded")
     try:
-        logger.info("OCR 自检阶段 3/3：初始化模型并执行推理")
         mark("inference-started")
         blank = np.full((64, 256, 3), 255, dtype=np.uint8)
         Vision(settings).ocr_image(blank)
-    except Exception:
-        mark("failed")
-        logger.exception("OCR 自检失败")
+    except Exception as exc:
+        mark(f"failed:{type(exc).__name__}:{str(exc)[:300]}")
         return 2
     mark("passed")
-    logger.info("OCR 自检通过")
     return 0
 
 

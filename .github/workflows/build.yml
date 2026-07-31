@@ -71,7 +71,7 @@ jobs:
           # 原生清理线程偶尔不会自行结束。这里不把“进程退出”误当作验收条件，
           # 而是等待 EXE 独立写出的推理成功哨兵；哨兵不依赖 logging。
           $passed = $false
-          $deadline = [DateTime]::UtcNow.AddMinutes(5)
+          $deadline = [DateTime]::UtcNow.AddMinutes(2)
           while ([DateTime]::UtcNow -lt $deadline) {
             if (Test-Path $status) {
               $passed = Select-String -Path $status -SimpleMatch "passed" -Quiet
