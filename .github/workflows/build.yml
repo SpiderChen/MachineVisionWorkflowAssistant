@@ -16,18 +16,27 @@ concurrency:
 
 jobs:
   build-windows:
-    runs-on: windows-latest
+    # windows-2022 比 windows-latest 的构建基线更保守；同时打 x64/x86，覆盖现代
+    # 64 位系统、仍在使用的 32 位系统，以及 Windows on ARM 的 x86 模拟层。
+    runs-on: windows-2022
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        architecture: [x64, x86]
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
+          architecture: ${{ matrix.architecture }}
           cache: pip
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip wheel
           pip install -r requirements.txt
-          pip install pyinstaller
+          pip install pyinstaller==6.21.0
+          python -c "import platform, struct; print(platform.platform()); print('Python bits:', struct.calcsize('P') * 8)"
       - name: Build EXE
         shell: pwsh
         run: |
@@ -46,7 +55,14 @@ jobs:
           $proc = Start-Process `
             -FilePath "dist/MachineVisionWorkflowAssistant.exe" `
             -ArgumentList "--ocr-self-test" `
-            -Wait -PassThru
+            -PassThru
+          # ONNX 初始化异常时可能既不退出也不抛错。硬超时可阻止 Runner 永久卡住，
+          # 并确保诊断日志仍会由下一步上传。
+          if (-not $proc.WaitForExit(300000)) {
+            Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+            Write-Output "::error title=Packaged OCR self-test timed out::OCR self-test exceeded 5 minutes on Windows ${{ matrix.architecture }}"
+            exit 124
+          }
           if (Test-Path "dist/logs/app.log") {
             Get-Content "dist/logs/app.log" -Tail 80
           }
@@ -58,7 +74,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v5
         with:
-          name: MachineVisionWorkflowAssistant-windows-diagnostics
+          name: MachineVisionWorkflowAssistant-windows-${{ matrix.architecture }}-diagnostics
           path: |
             pyinstaller-windows.log
             dist/logs/app.log
@@ -73,19 +89,21 @@ jobs:
           Copy-Item dist/MachineVisionWorkflowAssistant.exe $rel/
           Copy-Item config.yaml $rel/
           Copy-Item README.md $rel/
+          Copy-Item WINDOWS.md $rel/
           Copy-Item -Recurse samples $rel/samples
-          Compress-Archive -Path "$rel/*" -DestinationPath "release/MachineVisionWorkflowAssistant-windows.zip" -Force
+          Copy-Item dist/MachineVisionWorkflowAssistant.exe "release/MachineVisionWorkflowAssistant-windows-${{ matrix.architecture }}.exe"
+          Compress-Archive -Path "$rel/*" -DestinationPath "release/MachineVisionWorkflowAssistant-windows-${{ matrix.architecture }}.zip" -Force
       - name: Upload EXE artifact
         uses: actions/upload-artifact@v5
         with:
-          name: MachineVisionWorkflowAssistant-windows-exe
-          path: dist/MachineVisionWorkflowAssistant.exe
+          name: MachineVisionWorkflowAssistant-windows-${{ matrix.architecture }}-exe
+          path: release/MachineVisionWorkflowAssistant-windows-${{ matrix.architecture }}.exe
           if-no-files-found: error
       - name: Upload Windows bundle
         uses: actions/upload-artifact@v5
         with:
-          name: MachineVisionWorkflowAssistant-windows-bundle
-          path: release/MachineVisionWorkflowAssistant-windows.zip
+          name: MachineVisionWorkflowAssistant-windows-${{ matrix.architecture }}-bundle
+          path: release/MachineVisionWorkflowAssistant-windows-${{ matrix.architecture }}.zip
           if-no-files-found: error
 
   # Apple Silicon（macos-14）：稳定，作为 macOS 的主构建，参与发布门禁

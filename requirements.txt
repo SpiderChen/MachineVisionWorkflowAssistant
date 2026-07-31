@@ -1,8 +1,9 @@
 # 运行环境：Windows Server 2016、Windows 10/11，Python 3.10+（README §2）
 # 视觉与输入内核
 mss                                  # 快速截屏，多显示器
-opencv-python                        # 模板匹配 / 图像处理
-numpy
+# 固定到仍提供 Python 3.11 win32 轮子的组合，GitHub 可同时生成 x64/x86 包。
+opencv-python==4.10.0.84             # 模板匹配 / 图像处理
+numpy==1.26.4
 rapidocr-onnxruntime==1.4.4          # OCR 文字锚点（ONNX，CPU 即可）
 # 1.27/1.28 的 PyInstaller 单文件包在旧版 Windows 运行库上可能初始化 DLL 失败；
 # 1.20.1 与 RapidOCR 1.4.4 兼容，并规避目标 Windows Server 上的这条风险。

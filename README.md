@@ -71,9 +71,14 @@ Windows Python/Git Bash 环境运行程序。
 | DB 访问 | SQLAlchemy Core + `pyodbc` | SQL Server 主力，一套代码兼容 MySQL/PG/Oracle |
 | 打包 | `PyInstaller` | 打成单个 exe，开机自启放启动项 |
 
-运行环境要求：**Windows Server 2016、Windows 10/11**，Python 3.10+。Windows 使用
-PyQt5/Qt5 兼容旧系统；macOS/Linux 使用 PySide6/Qt6。采用 OCR 锚点定位后，**不再要求
-各部署机分辨率/缩放一致**（见 §2.1）。
+GitHub Release 提供无需安装 Python 的 Windows 便携包：普通电脑和服务器优先下载
+`MachineVisionWorkflowAssistant-windows-x64.zip`；只有 32 位 Windows 才使用
+`MachineVisionWorkflowAssistant-windows-x86.zip`。支持范围为 **Windows Server 2016/2019/
+2022/2025、Windows 10/11**；Windows on ARM 可通过系统的 x86 应用兼容层运行 x86 包。
+Windows 7/8/8.1、Vista、XP 已超出 Python/Qt/ONNX 的受支持范围，不能承诺兼容。
+完整安装说明与排错见 [`WINDOWS.md`](WINDOWS.md)。Windows 使用 PyQt5/Qt5 兼容旧版
+Server；macOS/Linux 使用 PySide6/Qt6。采用 OCR 锚点定位后，**不再要求各部署机分辨率/
+缩放一致**（见 §2.1）。
 
 ### 2.1 元素定位：三级策略（应对"用户屏幕不固定"）
 
