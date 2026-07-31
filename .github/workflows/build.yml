@@ -52,24 +52,54 @@ jobs:
       - name: Verify packaged OCR runtime
         shell: pwsh
         run: |
+          $log = "dist/logs/app.log"
+          Remove-Item $log -Force -ErrorAction SilentlyContinue
           $proc = Start-Process `
             -FilePath "dist/MachineVisionWorkflowAssistant.exe" `
             -ArgumentList "--ocr-self-test" `
             -PassThru
-          # ONNX 初始化异常时可能既不退出也不抛错。硬超时可阻止 Runner 永久卡住，
-          # 并确保诊断日志仍会由下一步上传。
-          if (-not $proc.WaitForExit(300000)) {
-            Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
-            Write-Output "::error title=Packaged OCR self-test timed out::OCR self-test exceeded 5 minutes on Windows ${{ matrix.architecture }}"
-            exit 124
+
+          # PyInstaller onefile + ONNX 的原生清理线程偶尔不会自行结束。这里不把
+          # “进程退出”误当作验收条件，而是等待 EXE 自己写出推理成功标记。
+          $passed = $false
+          $deadline = [DateTime]::UtcNow.AddMinutes(5)
+          while ([DateTime]::UtcNow -lt $deadline) {
+            if (Test-Path $log) {
+              $passed = Select-String -Path $log -SimpleMatch "OCR 自检通过" -Quiet
+              if ($passed) { break }
+            }
+            $proc.Refresh()
+            if ($proc.HasExited) { break }
+            Start-Sleep -Seconds 2
           }
-          if (Test-Path "dist/logs/app.log") {
-            Get-Content "dist/logs/app.log" -Tail 80
+
+          if (Test-Path $log) {
+            Get-Content $log -Tail 80
+          }
+          $proc.Refresh()
+          if ($passed) {
+            if (-not $proc.HasExited) {
+              Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+            }
+            Write-Output "Packaged OCR inference passed on Windows ${{ matrix.architecture }}"
+            exit 0
+          }
+          if (-not $proc.HasExited) {
+            Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+            $tail = if (Test-Path $log) {
+              (Get-Content $log -Tail 30).ForEach({
+                $_.Replace("%", "%25").Replace("`r", "%0D").Replace("`n", "%0A")
+              }) -join "%0A"
+            } else { "No OCR self-test log was created" }
+            Write-Output "::error title=Packaged OCR self-test timed out::$tail"
+            exit 124
           }
           if ($proc.ExitCode -ne 0) {
             Write-Output "::error title=Packaged OCR self-test failed::Exit code $($proc.ExitCode); see Windows diagnostics artifact"
             exit $proc.ExitCode
           }
+          Write-Output "::error title=Packaged OCR self-test failed::Process exited without the OCR success marker"
+          exit 3
       - name: Upload Windows diagnostics on failure
         if: failure()
         uses: actions/upload-artifact@v5
