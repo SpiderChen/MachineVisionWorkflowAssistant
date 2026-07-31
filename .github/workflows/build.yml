@@ -57,6 +57,7 @@ jobs:
           $exe = "dist/MachineVisionWorkflowAssistant/MachineVisionWorkflowAssistant.exe"
           $log = "dist/MachineVisionWorkflowAssistant/logs/app.log"
           Remove-Item $log -Force -ErrorAction SilentlyContinue
+          $env:MVWA_OCR_SELF_TEST = "1"
           $proc = Start-Process `
             -FilePath $exe `
             -ArgumentList "--ocr-self-test" `

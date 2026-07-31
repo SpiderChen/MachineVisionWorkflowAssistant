@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import signal
 import sys
 import threading
@@ -261,7 +262,10 @@ def main() -> int:
     init_logging(settings.log.level)
     logger.info("AutoPrintDeliveryOrder 启动（配置: %s）", settings.path)
 
-    if args.ocr_self_test:
+    ocr_self_test = (args.ocr_self_test
+                     or os.environ.get("MVWA_OCR_SELF_TEST") == "1")
+    logger.info("OCR 自检模式=%s（argv=%r）", ocr_self_test, sys.argv)
+    if ocr_self_test:
         return _cli_ocr_self_test(settings)
 
     vision, inputs, engine = _build_core(settings)

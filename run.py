@@ -56,8 +56,9 @@ def _finish_frozen_ocr_self_test(exit_code: int) -> int:
     即使推理和日志都已完成，Actions 的 Start-Process 仍会一直等待。这个特殊退出只用于
     ``--ocr-self-test`` 验收命令；正常托盘/服务模式仍走完整的 Python 清理流程。
     """
-    if (sys.platform == "win32" and getattr(sys, "frozen", False)
-            and "--ocr-self-test" in sys.argv):
+    self_test = ("--ocr-self-test" in sys.argv
+                 or os.environ.get("MVWA_OCR_SELF_TEST") == "1")
+    if sys.platform == "win32" and getattr(sys, "frozen", False) and self_test:
         try:
             import logging
 

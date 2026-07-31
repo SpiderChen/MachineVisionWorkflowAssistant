@@ -25,6 +25,18 @@ class OcrRuntimeTests(unittest.TestCase):
             self.assertEqual(_finish_frozen_ocr_self_test(2), 2)
         fake_exit.assert_not_called()
 
+    def test_frozen_self_test_environment_forces_process_exit(self):
+        fake_exit = Mock(side_effect=RuntimeError("os._exit called"))
+        with patch("run.sys.platform", "win32"), \
+                patch("run.sys.frozen", True, create=True), \
+                patch("run.sys.argv", ["app.exe"]), \
+                patch.dict("run.os.environ", {"MVWA_OCR_SELF_TEST": "1"}), \
+                patch("run.os._exit", fake_exit), \
+                patch("logging.shutdown"):
+            with self.assertRaisesRegex(RuntimeError, "os._exit called"):
+                _finish_frozen_ocr_self_test(0)
+        fake_exit.assert_called_once_with(0)
+
     def test_falls_back_to_rapidocr_v2_only_when_legacy_package_is_absent(self):
         marker = object()
         missing = ModuleNotFoundError(
