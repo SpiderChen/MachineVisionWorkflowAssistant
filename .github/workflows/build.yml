@@ -56,20 +56,21 @@ jobs:
         run: |
           $exe = "dist/MachineVisionWorkflowAssistant/MachineVisionWorkflowAssistant.exe"
           $log = "dist/MachineVisionWorkflowAssistant/logs/app.log"
-          Remove-Item $log -Force -ErrorAction SilentlyContinue
+          $status = "dist/MachineVisionWorkflowAssistant/logs/ocr-self-test.status"
+          Remove-Item $log, $status -Force -ErrorAction SilentlyContinue
           $env:MVWA_OCR_SELF_TEST = "1"
           $proc = Start-Process `
             -FilePath $exe `
             -ArgumentList "--ocr-self-test" `
             -PassThru
 
-          # PyInstaller onefile + ONNX 的原生清理线程偶尔不会自行结束。这里不把
-          # “进程退出”误当作验收条件，而是等待 EXE 自己写出推理成功标记。
+          # 原生清理线程偶尔不会自行结束。这里不把“进程退出”误当作验收条件，
+          # 而是等待 EXE 独立写出的推理成功哨兵；哨兵不依赖 logging。
           $passed = $false
           $deadline = [DateTime]::UtcNow.AddMinutes(5)
           while ([DateTime]::UtcNow -lt $deadline) {
-            if (Test-Path $log) {
-              $passed = Select-String -Path $log -SimpleMatch "OCR 自检通过" -Quiet
+            if (Test-Path $status) {
+              $passed = Select-String -Path $status -SimpleMatch "passed" -Quiet
               if ($passed) { break }
             }
             $proc.Refresh()
@@ -79,6 +80,9 @@ jobs:
 
           if (Test-Path $log) {
             Get-Content $log -Tail 80
+          }
+          if (Test-Path $status) {
+            Write-Output "OCR self-test stages: $((Get-Content $status) -join ' -> ')"
           }
           $proc.Refresh()
           if ($passed) {
@@ -90,12 +94,10 @@ jobs:
           }
           if (-not $proc.HasExited) {
             Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
-            $tail = if (Test-Path $log) {
-              (Get-Content $log -Tail 30).ForEach({
-                $_.Replace("%", "%25").Replace("`r", "%0D").Replace("`n", "%0A")
-              }) -join "%0A"
-            } else { "No OCR self-test log was created" }
-            Write-Output "::error title=Packaged OCR self-test timed out::$tail"
+            $stages = if (Test-Path $status) {
+              (Get-Content $status) -join " -> "
+            } else { "no status file" }
+            Write-Output "::error title=Packaged OCR self-test timed out::Last stages: $stages"
             exit 124
           }
           if ($proc.ExitCode -ne 0) {

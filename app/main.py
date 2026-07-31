@@ -88,19 +88,34 @@ def _cli_locate(vision, which: str) -> int:
 
 def _cli_ocr_self_test(settings) -> int:
     """初始化模型并实际推理一次，供 Windows 打包流水线拦截残缺成品。"""
+    status_path = settings.path.parent / "logs" / "ocr-self-test.status"
+    status_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def mark(stage: str) -> None:
+        # 不走 logging：冻结的 GUI 进程若卡在原生模块导入，Runner 仍能直接读到
+        # 最后完成的阶段。每次 with 关闭文件即强制刷新到磁盘。
+        with status_path.open("a", encoding="utf-8") as f:
+            f.write(stage + "\n")
+
+    mark("entered")
     logger.info("OCR 自检阶段 1/3：加载 NumPy")
     import numpy as np
 
+    mark("numpy-loaded")
     logger.info("OCR 自检阶段 2/3：加载视觉与 ONNX 模块")
     from .vision import Vision
 
+    mark("vision-loaded")
     try:
         logger.info("OCR 自检阶段 3/3：初始化模型并执行推理")
+        mark("inference-started")
         blank = np.full((64, 256, 3), 255, dtype=np.uint8)
         Vision(settings).ocr_image(blank)
     except Exception:
+        mark("failed")
         logger.exception("OCR 自检失败")
         return 2
+    mark("passed")
     logger.info("OCR 自检通过")
     return 0
 
@@ -264,7 +279,6 @@ def main() -> int:
 
     ocr_self_test = (args.ocr_self_test
                      or os.environ.get("MVWA_OCR_SELF_TEST") == "1")
-    logger.info("OCR 自检模式=%s（argv=%r）", ocr_self_test, sys.argv)
     if ocr_self_test:
         return _cli_ocr_self_test(settings)
 
